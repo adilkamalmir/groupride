@@ -30,6 +30,14 @@ class RideService {
     return Ride.fromJson(data as Map<String, dynamic>);
   }
 
+  Future<void> deleteRide(String id) async {
+    await _api.delete('/api/rides/$id');
+  }
+
+  Future<void> startDemo(String id) async {
+    await _api.post('/api/rides/$id/demo');
+  }
+
   Future<Ride> assignRole(String rideId, String userId, String role) async {
     final data = await _api.post('/api/rides/$rideId/roles', {
       'userId': userId,

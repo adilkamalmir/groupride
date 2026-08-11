@@ -222,10 +222,27 @@ class Ride {
 
   bool get isLive => status.toLowerCase() == 'live';
   bool get isCompleted => status.toLowerCase() == 'completed';
+  bool get isCancelled => status.toLowerCase() == 'cancelled';
 
   Duration get countdown {
     final diff = startAt.toLocal().difference(DateTime.now());
     return diff.isNegative ? Duration.zero : diff;
+  }
+
+  List<RiderLocation> knownRiderLocations() {
+    return members
+        .where((m) => m.lastLat != null && m.lastLng != null)
+        .map(
+          (m) => RiderLocation(
+            userId: m.userId,
+            displayName: m.displayName,
+            role: m.role,
+            status: m.status,
+            lat: m.lastLat!,
+            lng: m.lastLng!,
+          ),
+        )
+        .toList();
   }
 }
 

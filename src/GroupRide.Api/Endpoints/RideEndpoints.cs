@@ -5,6 +5,7 @@ using System.Text.Json;
 using GroupRide.Api.Auth;
 using GroupRide.Api.Dtos;
 using GroupRide.Api.Hubs;
+using GroupRide.Api.Services;
 using GroupRide.Cohesion;
 using GroupRide.Domain.Entities;
 using GroupRide.Domain.Enums;
@@ -222,6 +223,52 @@ public static class RideEndpoints
 
             await db.SaveChangesAsync();
             return Results.Ok(MapRide(await LoadRide(db, id)!));
+        });
+
+        g.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, AppDbContext db) =>
+        {
+            var userId = principal.GetUserId();
+            var ride = await db.Rides
+                .Include(r => r.Members)
+                .Include(r => r.Stops)
+                .Include(r => r.Invites)
+                .Include(r => r.Alerts)
+                .Include(r => r.Emergencies)
+                .Include(r => r.Timeline)
+                .FirstOrDefaultAsync(r => r.Id == id);
+            if (ride is null) return Results.NotFound();
+
+            var me = ride.Members.FirstOrDefault(m => m.UserId == userId);
+            if (me is null) return Results.Forbid();
+            if (me.Role != RideRole.Leader && ride.CreatedByUserId != userId)
+                return Results.Forbid();
+
+            if (ride.Status == RideStatus.Live)
+                return Results.BadRequest(new { error = "End the live ride before deleting it." });
+
+            var pings = db.LocationPings.Where(p => p.RideId == id);
+            db.LocationPings.RemoveRange(pings);
+            db.Rides.Remove(ride);
+            await db.SaveChangesAsync();
+            return Results.NoContent();
+        });
+
+        g.MapPost("/{id:guid}/demo", async (Guid id, ClaimsPrincipal principal, DemoRideSimulator demo) =>
+        {
+            var userId = principal.GetUserId();
+            try
+            {
+                await demo.StartAsync(id, userId);
+                return Results.Accepted($"/api/rides/{id}", new { rideId = id, demo = true });
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Results.Forbid();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
         });
 
         g.MapPost("/{id:guid}/roles", async (Guid id, AssignRoleRequest req, ClaimsPrincipal principal, AppDbContext db, IHubContext<RideHub> hub) =>

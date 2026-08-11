@@ -6,7 +6,7 @@ import 'package:provider/provider.dart';
 import '../services/maps_service.dart';
 import '../theme.dart';
 
-/// Google Places-backed location field with debounced suggestions.
+/// Google Places-backed location field with debounced, location-biased suggestions.
 class PlaceAutocompleteField extends StatefulWidget {
   const PlaceAutocompleteField({
     super.key,
@@ -15,6 +15,9 @@ class PlaceAutocompleteField extends StatefulWidget {
     this.helperText,
     this.onPlaceSelected,
     this.enabled = true,
+    this.biasLat,
+    this.biasLng,
+    this.nearbyKind,
   });
 
   final TextEditingController controller;
@@ -22,6 +25,9 @@ class PlaceAutocompleteField extends StatefulWidget {
   final String? helperText;
   final ValueChanged<GeocodedPlace>? onPlaceSelected;
   final bool enabled;
+  final double? biasLat;
+  final double? biasLng;
+  final String? nearbyKind;
 
   @override
   State<PlaceAutocompleteField> createState() => _PlaceAutocompleteFieldState();
@@ -45,6 +51,14 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
   }
 
   @override
+  void didUpdateWidget(covariant PlaceAutocompleteField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.biasLat != widget.biasLat || oldWidget.biasLng != widget.biasLng) {
+      if (_focus.hasFocus) _scheduleSearch(widget.controller.text);
+    }
+  }
+
+  @override
   void dispose() {
     _debounce?.cancel();
     widget.controller.removeListener(_onTextChanged);
@@ -58,7 +72,6 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
     if (_focus.hasFocus) {
       _scheduleSearch(widget.controller.text);
     } else {
-      // Delay so a tap on a suggestion can register first.
       Future<void>.delayed(const Duration(milliseconds: 150), () {
         if (!_focus.hasFocus) _removeOverlay();
       });
@@ -73,7 +86,8 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
   void _scheduleSearch(String raw) {
     _debounce?.cancel();
     final q = raw.trim();
-    if (q.length < 2) {
+    final hasBias = widget.biasLat != null && widget.biasLng != null;
+    if (q.length < 2 && !hasBias) {
       setState(() {
         _suggestions = const [];
         _loading = false;
@@ -89,7 +103,21 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
   Future<void> _runSearch(String q) async {
     final id = ++_requestId;
     try {
-      final results = await context.read<MapsService>().autocomplete(q);
+      final maps = context.read<MapsService>();
+      List<PlaceSuggestion> results;
+      if (q.length < 2 && widget.biasLat != null && widget.biasLng != null) {
+        results = await maps.nearby(
+          lat: widget.biasLat!,
+          lng: widget.biasLng!,
+          kind: widget.nearbyKind,
+        );
+      } else {
+        results = await maps.autocomplete(
+          q,
+          lat: widget.biasLat,
+          lng: widget.biasLng,
+        );
+      }
       if (!mounted || id != _requestId) return;
       setState(() {
         _suggestions = results;
@@ -120,6 +148,13 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
       if (place != null && mounted) {
         widget.controller.text = place.formattedAddress;
         widget.onPlaceSelected?.call(place);
+      } else if (mounted) {
+        // Fallback: treat description as a geocode query.
+        final geo = await context.read<MapsService>().geocode(suggestion.description);
+        if (geo != null) {
+          widget.controller.text = geo.formattedAddress;
+          widget.onPlaceSelected?.call(geo);
+        }
       }
     } finally {
       _selecting = false;

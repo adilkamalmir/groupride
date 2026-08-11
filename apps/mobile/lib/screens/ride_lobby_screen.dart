@@ -185,7 +185,7 @@ class _RideLobbyScreenState extends State<RideLobbyScreen> {
             ),
           ],
           const SizedBox(height: 24),
-          if (isLeader && !ride.isLive && !ride.isCompleted)
+          if (isLeader && !ride.isLive && !ride.isCompleted) ...[
             ElevatedButton(
               onPressed: () async {
                 await context.read<RideService>().startRide(ride.id);
@@ -196,6 +196,19 @@ class _RideLobbyScreenState extends State<RideLobbyScreen> {
               },
               child: const Text('Start ride'),
             ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () async {
+                await context.read<RideService>().startDemo(ride.id);
+                if (!mounted) return;
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => LiveRideScreen(rideId: ride.id)),
+                );
+              },
+              icon: const Icon(Icons.play_circle_outline),
+              label: const Text('Start demo run'),
+            ),
+          ],
           if (ride.isLive)
             ElevatedButton(
               onPressed: () {

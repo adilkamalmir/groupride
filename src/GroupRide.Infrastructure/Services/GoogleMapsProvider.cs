@@ -52,16 +52,27 @@ public class GoogleMapsProvider : IMapProvider
     }
 
     public async Task<IReadOnlyList<PlaceSuggestion>> AutocompleteAsync(
-        string input, CancellationToken ct = default)
+        string input,
+        double? biasLat = null,
+        double? biasLng = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(input) || input.Trim().Length < 2)
+        {
+            if (biasLat is not null && biasLng is not null)
+                return await NearbySuggestionsAsync(biasLat.Value, biasLng.Value, null, ct);
             return Array.Empty<PlaceSuggestion>();
+        }
 
         if (!IsConfigured)
-            return await _fallback.AutocompleteAsync(input, ct);
+            return await _fallback.AutocompleteAsync(input, biasLat, biasLng, ct);
+
+        var bias = biasLat is not null && biasLng is not null
+            ? $"&location={biasLat.Value.ToString(CultureInfo.InvariantCulture)},{biasLng.Value.ToString(CultureInfo.InvariantCulture)}&radius=50000"
+            : string.Empty;
 
         var url =
-            $"https://maps.googleapis.com/maps/api/place/autocomplete/json?input={Uri.EscapeDataString(input.Trim())}&key={_apiKey}";
+            $"https://maps.googleapis.com/maps/api/place/autocomplete/json?input={Uri.EscapeDataString(input.Trim())}{bias}&key={_apiKey}";
         try
         {
             using var res = await _http.GetAsync(url, ct);
@@ -82,8 +93,111 @@ public class GoogleMapsProvider : IMapProvider
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Places autocomplete failed for {Input}", input);
-            return await _fallback.AutocompleteAsync(input, ct);
+            return await _fallback.AutocompleteAsync(input, biasLat, biasLng, ct);
         }
+    }
+
+    public async Task<IReadOnlyList<PlaceSuggestion>> NearbySuggestionsAsync(
+        double lat, double lng, string? kind = null, CancellationToken ct = default)
+    {
+        if (!IsConfigured)
+            return await _fallback.NearbySuggestionsAsync(lat, lng, kind, ct);
+
+        var type = kind?.ToLowerInvariant() switch
+        {
+            "fuel" or "gas" => "gas_station",
+            "lunch" or "food" or "restaurant" => "restaurant",
+            "parking" => "parking",
+            _ => "point_of_interest"
+        };
+
+        var url =
+            $"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat.ToString(CultureInfo.InvariantCulture)},{lng.ToString(CultureInfo.InvariantCulture)}&radius=8000&type={type}&key={_apiKey}";
+        try
+        {
+            using var res = await _http.GetAsync(url, ct);
+            if (!res.IsSuccessStatusCode)
+                return await _fallback.NearbySuggestionsAsync(lat, lng, kind, ct);
+            var payload = await res.Content.ReadFromJsonAsync<PlacesNearbyResponse>(cancellationToken: ct);
+            return (payload?.Results ?? new List<PlaceResult>())
+                .Where(p => p.Geometry?.Location is not null && !string.IsNullOrWhiteSpace(p.Name))
+                .Take(8)
+                .Select(p => new PlaceSuggestion(
+                    p.PlaceId ?? $"nearby:{p.Name}",
+                    p.Vicinity is null ? p.Name! : $"{p.Name}, {p.Vicinity}",
+                    p.Name,
+                    p.Vicinity))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Nearby suggestions failed");
+            return await _fallback.NearbySuggestionsAsync(lat, lng, kind, ct);
+        }
+    }
+
+    public async Task<IReadOnlyList<GeocodedPlace>> SuggestStopsAlongRouteAsync(
+        IReadOnlyList<LatLngPoint> path, CancellationToken ct = default)
+    {
+        if (path.Count == 0)
+            return Array.Empty<GeocodedPlace>();
+
+        if (!IsConfigured)
+            return await _fallback.SuggestStopsAlongRouteAsync(path, ct);
+
+        var samples = SamplePath(path, 3);
+        var results = new List<GeocodedPlace>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var sample in samples)
+        {
+            foreach (var type in new[] { "gas_station", "restaurant" })
+            {
+                var url =
+                    $"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={sample.Lat.ToString(CultureInfo.InvariantCulture)},{sample.Lng.ToString(CultureInfo.InvariantCulture)}&radius=5000&type={type}&key={_apiKey}";
+                try
+                {
+                    using var res = await _http.GetAsync(url, ct);
+                    if (!res.IsSuccessStatusCode) continue;
+                    var payload = await res.Content.ReadFromJsonAsync<PlacesNearbyResponse>(cancellationToken: ct);
+                    foreach (var p in (payload?.Results ?? Enumerable.Empty<PlaceResult>()).Take(2))
+                    {
+                        if (p.Geometry?.Location is null || string.IsNullOrWhiteSpace(p.Name)) continue;
+                        var key = p.PlaceId ?? p.Name!;
+                        if (!seen.Add(key)) continue;
+                        var address = p.Vicinity is null ? p.Name! : $"{p.Name}, {p.Vicinity}";
+                        results.Add(new GeocodedPlace(
+                            p.Name!,
+                            address,
+                            p.Geometry.Location.Lat,
+                            p.Geometry.Location.Lng,
+                            p.PlaceId));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Stop suggestion failed for {Type}", type);
+                }
+            }
+        }
+
+        if (results.Count == 0)
+            return await _fallback.SuggestStopsAlongRouteAsync(path, ct);
+
+        return results.Take(8).ToList();
+    }
+
+    private static List<LatLngPoint> SamplePath(IReadOnlyList<LatLngPoint> path, int count)
+    {
+        if (path.Count == 0) return [];
+        if (path.Count == 1) return [path[0]];
+        var samples = new List<LatLngPoint>();
+        for (var i = 1; i <= count; i++)
+        {
+            var idx = (int)Math.Round((path.Count - 1) * (i / (double)(count + 1)));
+            samples.Add(path[Math.Clamp(idx, 0, path.Count - 1)]);
+        }
+        return samples;
     }
 
     public async Task<GeocodedPlace?> GetPlaceDetailsAsync(string placeId, CancellationToken ct = default)
@@ -312,6 +426,9 @@ public class GoogleMapsProvider : IMapProvider
     private sealed class PlaceResult
     {
         public string? Name { get; set; }
+        [JsonPropertyName("place_id")]
+        public string? PlaceId { get; set; }
+        public string? Vicinity { get; set; }
         public GeometryBlock? Geometry { get; set; }
     }
 

@@ -64,26 +64,81 @@ public class LocalMapProvider : IMapProvider
     }
 
     public Task<IReadOnlyList<PlaceSuggestion>> AutocompleteAsync(
-        string input, CancellationToken ct = default)
+        string input,
+        double? biasLat = null,
+        double? biasLng = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(input) || input.Trim().Length < 2)
+        {
+            if (biasLat is not null && biasLng is not null)
+                return NearbySuggestionsAsync(biasLat.Value, biasLng.Value, null, ct);
             return Task.FromResult<IReadOnlyList<PlaceSuggestion>>(Array.Empty<PlaceSuggestion>());
+        }
 
         var q = input.Trim();
         var hits = KnownPlaces
-            .Where(kv =>
-                kv.Key.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                kv.Value.Address.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                q.Contains(kv.Key, StringComparison.OrdinalIgnoreCase))
-            .Select(kv => new PlaceSuggestion(
-                $"local:{kv.Key}",
-                kv.Value.Address,
-                kv.Key,
-                kv.Value.Address))
+            .Select(kv =>
+            {
+                var d = biasLat is null || biasLng is null
+                    ? 0
+                    : Haversine(biasLat.Value, biasLng.Value, kv.Value.Lat, kv.Value.Lng);
+                return (kv, d);
+            })
+            .Where(x =>
+                x.kv.Key.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                x.kv.Value.Address.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                q.Contains(x.kv.Key, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => x.d)
+            .Select(x => new PlaceSuggestion(
+                $"local:{x.kv.Key}",
+                x.kv.Value.Address,
+                x.kv.Key,
+                x.kv.Value.Address))
             .Take(6)
             .ToList();
 
         return Task.FromResult<IReadOnlyList<PlaceSuggestion>>(hits);
+    }
+
+    public Task<IReadOnlyList<PlaceSuggestion>> NearbySuggestionsAsync(
+        double lat, double lng, string? kind = null, CancellationToken ct = default)
+    {
+        var kindFilter = kind?.ToLowerInvariant();
+        var hits = KnownPoints
+            .Select(p => p with { DistanceMeters = Haversine(lat, lng, p.Lat, p.Lng) })
+            .Where(p => kindFilter is null
+                        || (kindFilter is "fuel" or "gas" && p.Kind == "gas")
+                        || (kindFilter is "lunch" or "food" or "restaurant" && p.Kind is "rest" or "parking")
+                        || (kindFilter == "parking" && p.Kind == "parking"))
+            .OrderBy(p => p.DistanceMeters)
+            .Take(8)
+            .Select(p => new PlaceSuggestion(
+                $"local:{p.Name}",
+                p.Name,
+                p.Name,
+                $"{p.Kind} · {(p.DistanceMeters / 1000):0.0} km"))
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<PlaceSuggestion>>(hits);
+    }
+
+    public Task<IReadOnlyList<GeocodedPlace>> SuggestStopsAlongRouteAsync(
+        IReadOnlyList<LatLngPoint> path, CancellationToken ct = default)
+    {
+        if (path.Count == 0)
+            return Task.FromResult<IReadOnlyList<GeocodedPlace>>(Array.Empty<GeocodedPlace>());
+
+        var mid = path[path.Count / 2];
+        var stops = KnownPoints
+            .Where(p => p.Kind is "gas" or "rest" or "parking")
+            .Select(p => p with { DistanceMeters = Haversine(mid.Lat, mid.Lng, p.Lat, p.Lng) })
+            .OrderBy(p => p.DistanceMeters)
+            .Take(6)
+            .Select(p => new GeocodedPlace(p.Name, p.Name, p.Lat, p.Lng, $"local:{p.Name}"))
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<GeocodedPlace>>(stops);
     }
 
     public Task<GeocodedPlace?> GetPlaceDetailsAsync(string placeId, CancellationToken ct = default)
@@ -93,6 +148,12 @@ public class LocalMapProvider : IMapProvider
             var key = placeId["local:".Length..];
             if (KnownPlaces.TryGetValue(key, out var hit))
                 return Task.FromResult<GeocodedPlace?>(new GeocodedPlace(key, hit.Address, hit.Lat, hit.Lng, placeId));
+
+            var point = KnownPoints.FirstOrDefault(p =>
+                p.Name.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (point is not null)
+                return Task.FromResult<GeocodedPlace?>(
+                    new GeocodedPlace(point.Name, point.Name, point.Lat, point.Lng, placeId));
         }
 
         return GeocodeAsync(placeId, ct);

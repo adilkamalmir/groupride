@@ -109,12 +109,37 @@ class MapsService {
     }
   }
 
-  Future<List<PlaceSuggestion>> autocomplete(String query) async {
-    final data = await _api.get('/api/maps/autocomplete?q=${Uri.encodeQueryComponent(query)}');
+  Future<List<PlaceSuggestion>> autocomplete(
+    String query, {
+    double? lat,
+    double? lng,
+  }) async {
+    final params = <String, String>{
+      if (query.trim().isNotEmpty) 'q': query.trim(),
+      if (lat != null) 'lat': lat.toString(),
+      if (lng != null) 'lng': lng.toString(),
+    };
+    final qs = params.entries
+        .map((e) => '${e.key}=${Uri.encodeQueryComponent(e.value)}')
+        .join('&');
+    final data = await _api.get('/api/maps/autocomplete${qs.isEmpty ? '' : '?$qs'}');
     final list = data as List? ?? const [];
     return list
         .map((e) => PlaceSuggestion.fromJson(Map<String, dynamic>.from(e as Map)))
         .where((s) => s.placeId.isNotEmpty && s.description.isNotEmpty)
+        .toList();
+  }
+
+  Future<List<PlaceSuggestion>> nearby({
+    required double lat,
+    required double lng,
+    String? kind,
+  }) async {
+    final kindQs = kind == null ? '' : '&kind=${Uri.encodeQueryComponent(kind)}';
+    final data = await _api.get('/api/maps/nearby?lat=$lat&lng=$lng$kindQs');
+    final list = data as List? ?? const [];
+    return list
+        .map((e) => PlaceSuggestion.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
   }
 
@@ -132,5 +157,24 @@ class MapsService {
   Future<MotorcycleRoute> motorcycleRoute(List<Map<String, dynamic>> waypoints) async {
     final data = await _api.post('/api/maps/route', {'waypoints': waypoints});
     return MotorcycleRoute.fromJson(data as Map<String, dynamic>);
+  }
+
+  Future<List<GeocodedPlace>> stopsAlongRoute({
+    required double originLat,
+    required double originLng,
+    required double destLat,
+    required double destLng,
+    List<({double lat, double lng})>? path,
+  }) async {
+    final data = await _api.post('/api/maps/stops-along-route', {
+      'origin': {'lat': originLat, 'lng': originLng},
+      'destination': {'lat': destLat, 'lng': destLng},
+      if (path != null)
+        'path': [
+          for (final p in path) {'lat': p.lat, 'lng': p.lng},
+        ],
+    });
+    final list = data as List? ?? const [];
+    return list.map((e) => GeocodedPlace.fromJson(Map<String, dynamic>.from(e as Map))).toList();
   }
 }

@@ -17,10 +17,14 @@ class RideRealtimeService extends ChangeNotifier {
   Map<String, dynamic>? lastEmergency;
   Map<String, dynamic>? lastRegroup;
   bool connected = false;
+  bool rideCompleted = false;
 
   Future<void> connect(String token, String rideId) async {
     await disconnect();
     _rideId = rideId;
+    rideCompleted = false;
+    riders.clear();
+    alerts.clear();
 
     final hub = HubConnectionBuilder()
         .withUrl(
@@ -70,6 +74,20 @@ class RideRealtimeService extends ChangeNotifier {
     });
 
     hub.on('RiderStatusChanged', (args) {
+      notifyListeners();
+    });
+
+    hub.on('RideCompleted', (args) {
+      rideCompleted = true;
+      notifyListeners();
+    });
+
+    hub.on('RideStateChanged', (args) {
+      final map = args == null || args.isEmpty ? null : _asMap(args[0]);
+      final status = map?['status']?.toString().toLowerCase();
+      if (status == 'completed') {
+        rideCompleted = true;
+      }
       notifyListeners();
     });
 

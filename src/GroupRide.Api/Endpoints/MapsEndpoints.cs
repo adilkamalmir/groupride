@@ -28,11 +28,15 @@ public static class MapsEndpoints
             return place is null ? Results.NotFound(new { error = "No results" }) : Results.Ok(place);
         });
 
-        g.MapGet("/autocomplete", async (string q, IMapProvider maps) =>
+        g.MapGet("/autocomplete", async (string? q, double? lat, double? lng, IMapProvider maps) =>
         {
-            if (string.IsNullOrWhiteSpace(q))
-                return Results.Ok(Array.Empty<PlaceSuggestion>());
-            var suggestions = await maps.AutocompleteAsync(q);
+            var suggestions = await maps.AutocompleteAsync(q ?? string.Empty, lat, lng);
+            return Results.Ok(suggestions);
+        });
+
+        g.MapGet("/nearby", async (double lat, double lng, string? kind, IMapProvider maps) =>
+        {
+            var suggestions = await maps.NearbySuggestionsAsync(lat, lng, kind);
             return Results.Ok(suggestions);
         });
 
@@ -65,6 +69,27 @@ public static class MapsEndpoints
                 route.DecodedPath?.Select(p => new LatLngDto(p.Lat, p.Lng)).ToList() ?? new List<LatLngDto>()));
         });
 
+        g.MapPost("/stops-along-route", async (StopsAlongRouteRequest req, IMapProvider maps) =>
+        {
+            var path = (req.Path ?? new List<LatLngDto>())
+                .Select(p => new LatLngPoint(p.Lat, p.Lng))
+                .ToList();
+            if (path.Count == 0 && req.Origin is not null && req.Destination is not null)
+            {
+                path =
+                [
+                    new LatLngPoint(req.Origin.Lat, req.Origin.Lng),
+                    new LatLngPoint(req.Destination.Lat, req.Destination.Lng)
+                ];
+            }
+
+            if (path.Count == 0)
+                return Results.BadRequest(new { error = "path or origin/destination required" });
+
+            var stops = await maps.SuggestStopsAlongRouteAsync(path);
+            return Results.Ok(stops);
+        });
+
         return g;
     }
 }
@@ -78,3 +103,4 @@ public record MotorcycleRouteResponse(
     string TravelMode,
     string EncodedPolyline,
     List<LatLngDto> Path);
+public record StopsAlongRouteRequest(LatLngDto? Origin, LatLngDto? Destination, List<LatLngDto>? Path);

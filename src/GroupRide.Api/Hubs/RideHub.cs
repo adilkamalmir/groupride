@@ -50,6 +50,28 @@ public class RideHub : Hub
 
         await Groups.AddToGroupAsync(Context.ConnectionId, GroupName(rideId));
         await Clients.Caller.SendAsync("JoinedRide", rideId);
+
+        // Immediately show every rider that already has a known position.
+        var members = await _db.RideMembers
+            .Include(m => m.User)
+            .Where(m => m.RideId == rideId && m.LastLat != null && m.LastLng != null)
+            .ToListAsync();
+        if (members.Count > 0)
+        {
+            var locations = members.Select(m => new
+            {
+                m.UserId,
+                m.User.DisplayName,
+                Role = m.Role.ToString(),
+                Status = m.Status.ToString(),
+                Lat = m.LastLat,
+                Lng = m.LastLng,
+                SpeedMps = m.LastSpeedMps,
+                Heading = m.LastHeading,
+                m.LastLocationAt
+            });
+            await Clients.Caller.SendAsync("RiderLocationsUpdated", locations);
+        }
     }
 
     public async Task LeaveRide(Guid rideId)

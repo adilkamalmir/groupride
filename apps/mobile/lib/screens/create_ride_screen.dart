@@ -1,12 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
+import '../services/location_service.dart';
 import '../services/maps_service.dart';
 import '../services/ride_service.dart';
 import '../theme.dart';
 import '../widgets/place_autocomplete_field.dart';
+
+class _StopDraft {
+  _StopDraft({this.kind = 'fuel'});
+  final controller = TextEditingController();
+  GeocodedPlace? place;
+  String kind;
+
+  void dispose() => controller.dispose();
+}
 
 class CreateRideScreen extends StatefulWidget {
   const CreateRideScreen({super.key});
@@ -16,16 +27,15 @@ class CreateRideScreen extends StatefulWidget {
 }
 
 class _CreateRideScreenState extends State<CreateRideScreen> {
-  final _name = TextEditingController(text: 'Sunday Ottawa Valley Ride');
+  final _name = TextEditingController();
   final _meet = TextEditingController();
   final _dest = TextEditingController();
-  final _fuelStop = TextEditingController();
-  final _lunchStop = TextEditingController();
+  final List<_StopDraft> _stops = [];
 
   GeocodedPlace? _meetPlace;
   GeocodedPlace? _destPlace;
-  GeocodedPlace? _fuelPlace;
-  GeocodedPlace? _lunchPlace;
+  Position? _here;
+  List<GeocodedPlace> _routeStopIdeas = const [];
 
   DateTime _startAt = DateTime.now().add(const Duration(days: 1)).copyWith(
         hour: 10,
@@ -36,20 +46,38 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
       );
   bool _busy = false;
   bool _previewing = false;
+  bool _loadingIdeas = false;
   String? _error;
   String? _routeSummary;
   List<LatLng> _previewPath = const [];
   final List<Marker> _previewMarkers = [];
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadLocation());
+  }
+
+  Future<void> _loadLocation() async {
+    if (!mounted) return;
+    final pos = await context.read<LocationService>().currentPosition();
+    if (!mounted) return;
+    setState(() => _here = pos);
+  }
+
+  @override
   void dispose() {
     _name.dispose();
     _meet.dispose();
     _dest.dispose();
-    _fuelStop.dispose();
-    _lunchStop.dispose();
+    for (final s in _stops) {
+      s.dispose();
+    }
     super.dispose();
   }
+
+  double? get _biasLat => _meetPlace?.lat ?? _here?.latitude;
+  double? get _biasLng => _meetPlace?.lng ?? _here?.longitude;
 
   @override
   Widget build(BuildContext context) {
@@ -58,7 +86,13 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          TextField(controller: _name, decoration: const InputDecoration(labelText: 'Ride name')),
+          TextField(
+            controller: _name,
+            decoration: const InputDecoration(
+              labelText: 'Ride name',
+              hintText: 'e.g. Sunday valley loop',
+            ),
+          ),
           const SizedBox(height: 12),
           ListTile(
             contentPadding: EdgeInsets.zero,
@@ -70,29 +104,105 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
           PlaceAutocompleteField(
             controller: _meet,
             label: 'Meeting point',
-            helperText: 'Start typing — Google Places suggestions',
-            onPlaceSelected: (p) => setState(() => _meetPlace = p),
+            helperText: _here == null
+                ? 'Suggestions use Google Places'
+                : 'Suggestions near your current location',
+            biasLat: _biasLat,
+            biasLng: _biasLng,
+            onPlaceSelected: (p) {
+              setState(() => _meetPlace = p);
+              _maybeLoadStopIdeas();
+            },
           ),
           const SizedBox(height: 12),
           PlaceAutocompleteField(
             controller: _dest,
             label: 'Destination',
-            helperText: 'Start typing — Google Places suggestions',
-            onPlaceSelected: (p) => setState(() => _destPlace = p),
+            helperText: 'Suggestions near you / meeting point',
+            biasLat: _biasLat,
+            biasLng: _biasLng,
+            onPlaceSelected: (p) {
+              setState(() => _destPlace = p);
+              _maybeLoadStopIdeas();
+            },
           ),
-          const SizedBox(height: 12),
-          PlaceAutocompleteField(
-            controller: _fuelStop,
-            label: 'Fuel stop',
-            onPlaceSelected: (p) => setState(() => _fuelPlace = p),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              const Expanded(
+                child: Text('Stops', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              ),
+              TextButton.icon(
+                onPressed: () => setState(() => _stops.add(_StopDraft())),
+                icon: const Icon(Icons.add),
+                label: const Text('Add stop'),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          PlaceAutocompleteField(
-            controller: _lunchStop,
-            label: 'Lunch stop',
-            onPlaceSelected: (p) => setState(() => _lunchPlace = p),
-          ),
-          const SizedBox(height: 16),
+          if (_loadingIdeas)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: LinearProgressIndicator(),
+            ),
+          if (_routeStopIdeas.isNotEmpty) ...[
+            const Text('Suggested along route', style: TextStyle(color: AppTheme.steel, fontSize: 13)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final idea in _routeStopIdeas)
+                  ActionChip(
+                    label: Text(idea.query.isEmpty ? idea.formattedAddress : idea.query),
+                    onPressed: () => _addSuggestedStop(idea),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+          for (var i = 0; i < _stops.length; i++) ...[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: PlaceAutocompleteField(
+                    controller: _stops[i].controller,
+                    label: 'Stop ${i + 1}',
+                    biasLat: _stopBiasLat,
+                    biasLng: _stopBiasLng,
+                    nearbyKind: _stops[i].kind,
+                    onPlaceSelected: (p) => setState(() => _stops[i].place = p),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  children: [
+                    DropdownButton<String>(
+                      value: _stops[i].kind,
+                      items: const [
+                        DropdownMenuItem(value: 'fuel', child: Text('Fuel')),
+                        DropdownMenuItem(value: 'lunch', child: Text('Lunch')),
+                        DropdownMenuItem(value: 'rest', child: Text('Rest')),
+                        DropdownMenuItem(value: 'other', child: Text('Other')),
+                      ],
+                      onChanged: (v) => setState(() => _stops[i].kind = v ?? 'fuel'),
+                    ),
+                    IconButton(
+                      onPressed: () {
+                        setState(() {
+                          _stops[i].dispose();
+                          _stops.removeAt(i);
+                        });
+                      },
+                      icon: const Icon(Icons.close, color: AppTheme.steel),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+          const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: _busy || _previewing ? null : _previewRoute,
             icon: _previewing
@@ -160,6 +270,71 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     );
   }
 
+  double? get _stopBiasLat {
+    if (_previewPath.length >= 2) {
+      return _previewPath[_previewPath.length ~/ 2].latitude;
+    }
+    if (_meetPlace != null && _destPlace != null) {
+      return (_meetPlace!.lat + _destPlace!.lat) / 2;
+    }
+    return _biasLat;
+  }
+
+  double? get _stopBiasLng {
+    if (_previewPath.length >= 2) {
+      return _previewPath[_previewPath.length ~/ 2].longitude;
+    }
+    if (_meetPlace != null && _destPlace != null) {
+      return (_meetPlace!.lng + _destPlace!.lng) / 2;
+    }
+    return _biasLng;
+  }
+
+  void _addSuggestedStop(GeocodedPlace idea) {
+    final draft = _StopDraft(
+      kind: idea.query.toLowerCase().contains('gas') ||
+              idea.formattedAddress.toLowerCase().contains('gas')
+          ? 'fuel'
+          : 'lunch',
+    );
+    draft.place = idea;
+    draft.controller.text = idea.formattedAddress;
+    setState(() => _stops.add(draft));
+  }
+
+  Future<void> _maybeLoadStopIdeas() async {
+    if (_meetPlace == null || _destPlace == null) return;
+    setState(() => _loadingIdeas = true);
+    try {
+      final maps = context.read<MapsService>();
+      var path = <({double lat, double lng})>[
+        (lat: _meetPlace!.lat, lng: _meetPlace!.lng),
+        (lat: _destPlace!.lat, lng: _destPlace!.lng),
+      ];
+      try {
+        final route = await maps.motorcycleRoute([
+          {'name': _meetPlace!.formattedAddress, 'lat': _meetPlace!.lat, 'lng': _meetPlace!.lng},
+          {'name': _destPlace!.formattedAddress, 'lat': _destPlace!.lat, 'lng': _destPlace!.lng},
+        ]);
+        if (route.path.length >= 2) path = route.path;
+      } catch (_) {}
+
+      final ideas = await maps.stopsAlongRoute(
+        originLat: _meetPlace!.lat,
+        originLng: _meetPlace!.lng,
+        destLat: _destPlace!.lat,
+        destLng: _destPlace!.lng,
+        path: path,
+      );
+      if (!mounted) return;
+      setState(() => _routeStopIdeas = ideas);
+    } catch (_) {
+      // Suggestions are optional.
+    } finally {
+      if (mounted) setState(() => _loadingIdeas = false);
+    }
+  }
+
   Future<void> _pickDateTime() async {
     final date = await showDatePicker(
       context: context,
@@ -201,11 +376,10 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     final dest = await _ensurePlace(maps, _destPlace, _dest.text, 'Destination');
 
     final places = <GeocodedPlace>[meet];
-    if (_fuelStop.text.trim().isNotEmpty) {
-      places.add(await _ensurePlace(maps, _fuelPlace, _fuelStop.text, 'Fuel stop'));
-    }
-    if (_lunchStop.text.trim().isNotEmpty) {
-      places.add(await _ensurePlace(maps, _lunchPlace, _lunchStop.text, 'Lunch stop'));
+    for (var i = 0; i < _stops.length; i++) {
+      final s = _stops[i];
+      if (s.controller.text.trim().isEmpty) continue;
+      places.add(await _ensurePlace(maps, s.place, s.controller.text, 'Stop ${i + 1}'));
     }
     places.add(dest);
 
@@ -258,6 +432,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
         _routeSummary =
             '${route.travelMode} · $km km · ~$mins min (Google Maps motorbike routing)';
       });
+      await _maybeLoadStopIdeas();
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -271,6 +446,9 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
       _error = null;
     });
     try {
+      if (_name.text.trim().isEmpty) {
+        throw Exception('Ride name is required');
+      }
       final maps = context.read<MapsService>();
       final rides = context.read<RideService>();
       final meet = await _ensurePlace(maps, _meetPlace, _meet.text, 'Meeting point');
@@ -278,23 +456,14 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
 
       final stops = <Map<String, dynamic>>[];
       var order = 1;
-      if (_fuelStop.text.trim().isNotEmpty) {
-        final fuel = await _ensurePlace(maps, _fuelPlace, _fuelStop.text, 'Fuel stop');
+      for (final s in _stops) {
+        if (s.controller.text.trim().isEmpty) continue;
+        final place = await _ensurePlace(maps, s.place, s.controller.text, 'Stop');
         stops.add({
-          'name': fuel.formattedAddress,
-          'kind': 'fuel',
-          'lat': fuel.lat,
-          'lng': fuel.lng,
-          'sortOrder': order++,
-        });
-      }
-      if (_lunchStop.text.trim().isNotEmpty) {
-        final lunch = await _ensurePlace(maps, _lunchPlace, _lunchStop.text, 'Lunch stop');
-        stops.add({
-          'name': lunch.formattedAddress,
-          'kind': 'lunch',
-          'lat': lunch.lat,
-          'lng': lunch.lng,
+          'name': place.formattedAddress,
+          'kind': s.kind,
+          'lat': place.lat,
+          'lng': place.lng,
           'sortOrder': order++,
         });
       }
