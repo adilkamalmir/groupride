@@ -7,10 +7,18 @@ import '../services/location_service.dart';
 import '../services/maps_service.dart';
 import '../services/ride_service.dart';
 import '../theme.dart';
+import '../widgets/app_map_style.dart';
 import '../widgets/place_autocomplete_field.dart';
+import '../widgets/stop_picker_section.dart';
 
 class _StopDraft {
-  _StopDraft({this.kind = 'fuel'});
+  _StopDraft({this.kind = 'fuel', this.place, String? label}) {
+    if (place != null) {
+      controller.text = place!.formattedAddress;
+    } else if (label != null) {
+      controller.text = label;
+    }
+  }
   final controller = TextEditingController();
   GeocodedPlace? place;
   String kind;
@@ -37,7 +45,6 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
   double? _hereLng;
   bool _locating = true;
   String? _locationError;
-  List<GeocodedPlace> _routeStopIdeas = const [];
 
   DateTime _startAt = DateTime.now().add(const Duration(days: 1)).copyWith(
         hour: 10,
@@ -48,7 +55,6 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
       );
   bool _busy = false;
   bool _previewing = false;
-  bool _loadingIdeas = false;
   String? _error;
   String? _routeSummary;
   List<LatLng> _previewPath = const [];
@@ -113,12 +119,64 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
   double? get _biasLng => _meetPlace?.lng ?? _hereLng;
   bool get _hasGps => _hereLat != null && _hereLng != null;
 
+  double? get _stopBiasLat {
+    if (_previewPath.length >= 2) {
+      return _previewPath[_previewPath.length ~/ 2].latitude;
+    }
+    if (_meetPlace != null && _destPlace != null) {
+      return (_meetPlace!.lat + _destPlace!.lat) / 2;
+    }
+    return _biasLat;
+  }
+
+  double? get _stopBiasLng {
+    if (_previewPath.length >= 2) {
+      return _previewPath[_previewPath.length ~/ 2].longitude;
+    }
+    if (_meetPlace != null && _destPlace != null) {
+      return (_meetPlace!.lng + _destPlace!.lng) / 2;
+    }
+    return _biasLng;
+  }
+
+  String _normalizeKind(String kind) {
+    switch (kind.toLowerCase()) {
+      case 'gas':
+      case 'fuel':
+        return 'fuel';
+      case 'coffee':
+      case 'cafe':
+        return 'coffee';
+      case 'viewpoint':
+      case 'views':
+      case 'scenic':
+        return 'viewpoint';
+      case 'food':
+      case 'lunch':
+      case 'restaurant':
+        return 'lunch';
+      case 'parking':
+        return 'parking';
+      case 'rest':
+        return 'rest';
+      default:
+        return 'other';
+    }
+  }
+
+  void _addStop(GeocodedPlace place, String kind) {
+    setState(() {
+      _stops.add(
+        _StopDraft(
+          kind: _normalizeKind(kind),
+          place: place,
+        ),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    final locationHint = !_hasGps
-        ? 'Waiting for your phone location…'
-        : 'Suggestions near your location (${_hereLat!.toStringAsFixed(4)}, ${_hereLng!.toStringAsFixed(4)})';
-
     return Scaffold(
       appBar: AppBar(title: const Text('Create ride')),
       body: ListView(
@@ -135,7 +193,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
                 title: Text('Getting your location…'),
-                subtitle: Text('Google suggestions will use your GPS position'),
+                subtitle: Text('Suggestions will use your GPS position'),
               ),
             ),
           if (_locationError != null) ...[
@@ -165,103 +223,64 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
           PlaceAutocompleteField(
             controller: _meet,
             label: 'Meeting point',
-            helperText: locationHint,
             enabled: _hasGps,
             biasLat: _biasLat,
             biasLng: _biasLng,
-            onPlaceSelected: (p) {
-              setState(() => _meetPlace = p);
-              _maybeLoadStopIdeas();
-            },
+            onPlaceSelected: (p) => setState(() => _meetPlace = p),
           ),
           const SizedBox(height: 12),
           PlaceAutocompleteField(
             controller: _dest,
             label: 'Destination',
-            helperText: locationHint,
             enabled: _hasGps,
             biasLat: _biasLat,
             biasLng: _biasLng,
-            onPlaceSelected: (p) {
-              setState(() => _destPlace = p);
-              _maybeLoadStopIdeas();
-            },
+            onPlaceSelected: (p) => setState(() => _destPlace = p),
           ),
           const SizedBox(height: 20),
-          Row(
-            children: [
-              const Expanded(
-                child: Text('Stops', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-              ),
-              TextButton.icon(
-                onPressed: !_hasGps ? null : () => setState(() => _stops.add(_StopDraft())),
-                icon: const Icon(Icons.add),
-                label: const Text('Add stop'),
+          const Text('Stops', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          const Text(
+            'Search any place, or browse gas, coffee, views, food, and parking near the route.',
+            style: TextStyle(color: AppTheme.steel, fontSize: 13),
+          ),
+          const SizedBox(height: 12),
+          StopPickerSection(
+            enabled: _hasGps,
+            biasLat: _stopBiasLat,
+            biasLng: _stopBiasLng,
+            onStopPicked: _addStop,
+          ),
+          if (_stops.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const Text('Added stops', style: TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            for (var i = 0; i < _stops.length; i++) ...[
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: Icon(
+                    _stopIcon(_stops[i].kind),
+                    color: AppTheme.signalSoft,
+                  ),
+                  title: Text(
+                    _stops[i].controller.text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(_stops[i].kind),
+                  trailing: IconButton(
+                    onPressed: () {
+                      setState(() {
+                        _stops[i].dispose();
+                        _stops.removeAt(i);
+                      });
+                    },
+                    icon: const Icon(Icons.close, color: AppTheme.steel),
+                  ),
+                ),
               ),
             ],
-          ),
-          if (_loadingIdeas)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: LinearProgressIndicator(),
-            ),
-          if (_routeStopIdeas.isNotEmpty) ...[
-            const Text('Suggested along route', style: TextStyle(color: AppTheme.steel, fontSize: 13)),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final idea in _routeStopIdeas)
-                  ActionChip(
-                    label: Text(idea.query.isEmpty ? idea.formattedAddress : idea.query),
-                    onPressed: () => _addSuggestedStop(idea),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-          ],
-          for (var i = 0; i < _stops.length; i++) ...[
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: PlaceAutocompleteField(
-                    controller: _stops[i].controller,
-                    label: 'Stop ${i + 1}',
-                    biasLat: _stopBiasLat,
-                    biasLng: _stopBiasLng,
-                    nearbyKind: _stops[i].kind,
-                    onPlaceSelected: (p) => setState(() => _stops[i].place = p),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Column(
-                  children: [
-                    DropdownButton<String>(
-                      value: _stops[i].kind,
-                      items: const [
-                        DropdownMenuItem(value: 'fuel', child: Text('Fuel')),
-                        DropdownMenuItem(value: 'lunch', child: Text('Lunch')),
-                        DropdownMenuItem(value: 'rest', child: Text('Rest')),
-                        DropdownMenuItem(value: 'other', child: Text('Other')),
-                      ],
-                      onChanged: (v) => setState(() => _stops[i].kind = v ?? 'fuel'),
-                    ),
-                    IconButton(
-                      onPressed: () {
-                        setState(() {
-                          _stops[i].dispose();
-                          _stops.removeAt(i);
-                        });
-                      },
-                      icon: const Icon(Icons.close, color: AppTheme.steel),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
           ],
           const SizedBox(height: 8),
           OutlinedButton.icon(
@@ -284,27 +303,16 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
             ClipRRect(
               borderRadius: BorderRadius.circular(16),
               child: SizedBox(
-                height: 200,
+                height: 240,
                 child: FlutterMap(
                   options: MapOptions(
                     initialCenter: _previewPath[_previewPath.length ~/ 2],
-                    initialZoom: 9,
+                    initialZoom: 10,
                     interactionOptions: const InteractionOptions(flags: InteractiveFlag.all),
                   ),
                   children: [
-                    TileLayer(
-                      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.groupride.mobile',
-                    ),
-                    PolylineLayer(
-                      polylines: [
-                        Polyline(
-                          points: _previewPath,
-                          color: AppTheme.signal.withValues(alpha: 0.9),
-                          strokeWidth: 4,
-                        ),
-                      ],
-                    ),
+                    AppMapStyle.tileLayer(),
+                    PolylineLayer(polylines: AppMapStyle.routePolylines(_previewPath)),
                     MarkerLayer(markers: _previewMarkers),
                   ],
                 ),
@@ -331,68 +339,22 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     );
   }
 
-  double? get _stopBiasLat {
-    if (_previewPath.length >= 2) {
-      return _previewPath[_previewPath.length ~/ 2].latitude;
-    }
-    if (_meetPlace != null && _destPlace != null) {
-      return (_meetPlace!.lat + _destPlace!.lat) / 2;
-    }
-    return _biasLat;
-  }
-
-  double? get _stopBiasLng {
-    if (_previewPath.length >= 2) {
-      return _previewPath[_previewPath.length ~/ 2].longitude;
-    }
-    if (_meetPlace != null && _destPlace != null) {
-      return (_meetPlace!.lng + _destPlace!.lng) / 2;
-    }
-    return _biasLng;
-  }
-
-  void _addSuggestedStop(GeocodedPlace idea) {
-    final draft = _StopDraft(
-      kind: idea.query.toLowerCase().contains('gas') ||
-              idea.formattedAddress.toLowerCase().contains('gas')
-          ? 'fuel'
-          : 'lunch',
-    );
-    draft.place = idea;
-    draft.controller.text = idea.formattedAddress;
-    setState(() => _stops.add(draft));
-  }
-
-  Future<void> _maybeLoadStopIdeas() async {
-    if (_meetPlace == null || _destPlace == null) return;
-    setState(() => _loadingIdeas = true);
-    try {
-      final maps = context.read<MapsService>();
-      var path = <({double lat, double lng})>[
-        (lat: _meetPlace!.lat, lng: _meetPlace!.lng),
-        (lat: _destPlace!.lat, lng: _destPlace!.lng),
-      ];
-      try {
-        final route = await maps.motorcycleRoute([
-          {'name': _meetPlace!.formattedAddress, 'lat': _meetPlace!.lat, 'lng': _meetPlace!.lng},
-          {'name': _destPlace!.formattedAddress, 'lat': _destPlace!.lat, 'lng': _destPlace!.lng},
-        ]);
-        if (route.path.length >= 2) path = route.path;
-      } catch (_) {}
-
-      final ideas = await maps.stopsAlongRoute(
-        originLat: _meetPlace!.lat,
-        originLng: _meetPlace!.lng,
-        destLat: _destPlace!.lat,
-        destLng: _destPlace!.lng,
-        path: path,
-      );
-      if (!mounted) return;
-      setState(() => _routeStopIdeas = ideas);
-    } catch (_) {
-      // Suggestions are optional.
-    } finally {
-      if (mounted) setState(() => _loadingIdeas = false);
+  IconData _stopIcon(String kind) {
+    switch (kind) {
+      case 'fuel':
+        return Icons.local_gas_station;
+      case 'coffee':
+        return Icons.coffee;
+      case 'viewpoint':
+        return Icons.landscape;
+      case 'lunch':
+        return Icons.restaurant;
+      case 'parking':
+        return Icons.local_parking;
+      case 'rest':
+        return Icons.airline_seat_recline_extra;
+      default:
+        return Icons.place;
     }
   }
 
@@ -470,30 +432,27 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
         _previewMarkers
           ..clear()
           ..addAll([
-            Marker(
+            AppMapStyle.pin(
               point: LatLng(places.first.lat, places.first.lng),
-              width: 36,
-              height: 36,
-              child: const Icon(Icons.flag, color: AppTheme.signalSoft),
+              color: AppMapStyle.startPin,
+              icon: Icons.flag,
             ),
             for (var i = 1; i < places.length - 1; i++)
-              Marker(
+              AppMapStyle.pin(
                 point: LatLng(places[i].lat, places[i].lng),
-                width: 36,
-                height: 36,
-                child: const Icon(Icons.place, color: AppTheme.fuel),
+                color: AppTheme.fuel,
+                icon: Icons.place,
+                size: 34,
               ),
-            Marker(
+            AppMapStyle.pin(
               point: LatLng(places.last.lat, places.last.lng),
-              width: 36,
-              height: 36,
-              child: const Icon(Icons.sports_score, color: AppTheme.signal),
+              color: AppMapStyle.endPin,
+              icon: Icons.sports_score,
             ),
           ]);
         _routeSummary =
             '${route.travelMode} · $km km · ~$mins min (Google Maps motorbike routing)';
       });
-      await _maybeLoadStopIdeas();
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {

@@ -8,12 +8,16 @@ class LocalPlacesFallback {
   LocalPlacesFallback._();
 
   static const _places = <({String name, String address, double lat, double lng, String kind})>[
-    (name: 'Tim Hortons Kanata', address: 'Tim Hortons, Kanata, ON', lat: 45.3001, lng: -75.9105, kind: 'meeting'),
+    (name: 'Tim Hortons Kanata', address: 'Tim Hortons, Kanata, ON', lat: 45.3001, lng: -75.9105, kind: 'coffee'),
+    (name: 'Bridgehead Coffee Westboro', address: 'Westboro, Ottawa, ON', lat: 45.3930, lng: -75.7550, kind: 'coffee'),
     (name: 'Canadian Tire Gas Barrhaven', address: 'Barrhaven, ON', lat: 45.2750, lng: -75.7360, kind: 'fuel'),
     (name: 'Renfrew Petro-Canada', address: 'Renfrew, ON', lat: 45.4747, lng: -76.6831, kind: 'fuel'),
-    (name: 'Calabogie Motorsports Park', address: 'Calabogie, ON', lat: 45.3008, lng: -76.7175, kind: 'meeting'),
+    (name: 'Calabogie Motorsports Park', address: 'Calabogie, ON', lat: 45.3008, lng: -76.7175, kind: 'parking'),
     (name: 'Arnprior Rest Stop', address: 'Arnprior, ON', lat: 45.4333, lng: -76.3500, kind: 'rest'),
     (name: 'Mississippi Mills Parking', address: 'Mississippi Mills, ON', lat: 45.2260, lng: -76.1940, kind: 'parking'),
+    (name: 'Champlain Lookout', address: 'Gatineau Park, QC', lat: 45.4890, lng: -75.8670, kind: 'viewpoint'),
+    (name: 'Ottawa River Parkway View', address: 'Ottawa, ON', lat: 45.4100, lng: -75.7500, kind: 'viewpoint'),
+    (name: 'The Works Gatineau', address: 'Gatineau, QC', lat: 45.4280, lng: -75.7100, kind: 'food'),
     (name: 'Ottawa', address: 'Ottawa, ON', lat: 45.4215, lng: -75.6972, kind: 'city'),
     (name: 'Kanata', address: 'Kanata, ON', lat: 45.3001, lng: -75.9105, kind: 'city'),
     (name: 'Barrhaven', address: 'Barrhaven, ON', lat: 45.2750, lng: -75.7360, kind: 'city'),
@@ -26,9 +30,17 @@ class LocalPlacesFallback {
       return (place: p, km: km);
     }).where((x) {
       if (x.km > 80) return false;
-      if (kindFilter == null) return true;
+      if (kindFilter == null || kindFilter == 'other') return true;
       if (kindFilter == 'fuel' || kindFilter == 'gas') return x.place.kind == 'fuel';
+      if (kindFilter == 'coffee' || kindFilter == 'cafe') return x.place.kind == 'coffee';
+      if (kindFilter == 'viewpoint' || kindFilter == 'views' || kindFilter == 'scenic') {
+        return x.place.kind == 'viewpoint';
+      }
+      if (kindFilter == 'food' || kindFilter == 'lunch' || kindFilter == 'restaurant') {
+        return x.place.kind == 'food';
+      }
       if (kindFilter == 'parking') return x.place.kind == 'parking';
+      if (kindFilter == 'rest') return x.place.kind == 'rest';
       return true;
     }).toList()
       ..sort((a, b) => a.km.compareTo(b.km));

@@ -613,7 +613,9 @@ public static class RideEndpoints
 
     private static string GenerateToken()
     {
-        var bytes = RandomNumberGenerator.GetBytes(9);
-        return Convert.ToBase64String(bytes).Replace("+", "").Replace("/", "").Replace("=", "")[..12].ToLowerInvariant();
+        // Keep only URL-safe chars without shrinking length (old Replace→[..12] could throw).
+        var bytes = RandomNumberGenerator.GetBytes(12);
+        var raw = Convert.ToHexString(bytes).ToLowerInvariant();
+        return raw[..12];
     }
 }

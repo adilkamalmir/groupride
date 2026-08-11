@@ -116,12 +116,23 @@ public class GoogleMapsProvider : IMapProvider
         {
             "fuel" or "gas" => "gas_station",
             "lunch" or "food" or "restaurant" => "restaurant",
+            "coffee" or "cafe" => "cafe",
             "parking" => "parking",
-            // Meeting points: cafes / parking near the rider work better than generic POI noise.
+            "rest" => "rest_stop",
+            "viewpoint" or "views" or "scenic" or "lookout" => "tourist_attraction",
             _ => "cafe"
         };
 
-        var results = await NearbySearchAsync(lat, lng, type, keyword: null, radiusMeters: 12000, ct);
+        string? keyword = kind?.ToLowerInvariant() switch
+        {
+            "viewpoint" or "views" or "scenic" or "lookout" => "scenic viewpoint lookout",
+            "coffee" or "cafe" => "coffee",
+            _ => null
+        };
+
+        var results = await NearbySearchAsync(lat, lng, type, keyword, radiusMeters: 15000, ct);
+        if (results.Count == 0 && type == "tourist_attraction")
+            results = await NearbySearchAsync(lat, lng, type: null, keyword: "scenic overlook", radiusMeters: 25000, ct);
         if (results.Count == 0 && type == "cafe")
             results = await NearbySearchAsync(lat, lng, "parking", keyword: null, radiusMeters: 12000, ct);
         if (results.Count == 0)

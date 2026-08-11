@@ -10,12 +10,16 @@ public class LocalMapProvider : IMapProvider
 {
     private static readonly RegroupPointCandidate[] KnownPoints =
     [
-        new("Tim Hortons Kanata", "parking", 45.3001, -75.9105, 0),
+        new("Tim Hortons Kanata", "cafe", 45.3001, -75.9105, 0),
         new("Canadian Tire Gas Barrhaven", "gas", 45.2750, -75.7360, 0),
         new("Renfrew Petro-Canada", "gas", 45.4747, -76.6831, 0),
         new("Calabogie Motorsports Park", "parking", 45.3008, -76.7175, 0),
         new("Arnprior Rest Stop", "rest", 45.4333, -76.3500, 0),
         new("Mississippi Mills Parking", "parking", 45.2260, -76.1940, 0),
+        new("Champlain Lookout", "viewpoint", 45.4890, -75.8670, 0),
+        new("Ottawa River Parkway View", "viewpoint", 45.4100, -75.7500, 0),
+        new("Bridgehead Coffee Westboro", "cafe", 45.3930, -75.7550, 0),
+        new("The Works Gatineau", "food", 45.4280, -75.7100, 0),
     ];
 
     private static readonly Dictionary<string, (double Lat, double Lng, string Address)> KnownPlaces = new(StringComparer.OrdinalIgnoreCase)
@@ -138,11 +142,21 @@ public class LocalMapProvider : IMapProvider
         var fromPoints = KnownPoints
             .Select(p => p with { DistanceMeters = Haversine(lat, lng, p.Lat, p.Lng) })
             .Where(p => p.DistanceMeters <= 40_000)
-            .Where(p => kindFilter is null
-                        || (kindFilter is "fuel" or "gas" && p.Kind == "gas")
-                        || (kindFilter is "lunch" or "food" or "restaurant" && p.Kind is "rest" or "parking")
-                        || (kindFilter == "parking" && p.Kind == "parking")
-                        || (kindFilter is "cafe" or "meeting" && p.Kind is "parking" or "rest"));
+            .Where(p =>
+            {
+                if (kindFilter is null) return true;
+                return kindFilter switch
+                {
+                    "fuel" or "gas" => p.Kind == "gas",
+                    "lunch" or "food" or "restaurant" => p.Kind is "food" or "rest" or "parking",
+                    "coffee" or "cafe" => p.Kind is "cafe" or "rest",
+                    "viewpoint" or "views" or "scenic" or "lookout" => p.Kind == "viewpoint",
+                    "parking" => p.Kind == "parking",
+                    "rest" => p.Kind is "rest" or "parking",
+                    "meeting" => p.Kind is "cafe" or "parking" or "rest",
+                    _ => true
+                };
+            });
 
         var fromPlaces = KnownPlaces
             .Select(kv => (

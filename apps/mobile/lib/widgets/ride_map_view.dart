@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../models/models.dart';
 import '../theme.dart';
+import 'app_map_style.dart';
 import 'rider_letter_marker.dart';
 
 class RideMapView extends StatelessWidget {
@@ -36,28 +37,22 @@ class RideMapView extends StatelessWidget {
         : LatLng(ride.meetLat, ride.meetLng);
 
     final markers = <Marker>[
-      Marker(
+      AppMapStyle.pin(
         point: LatLng(ride.meetLat, ride.meetLng),
-        width: 40,
-        height: 40,
-        child: const Icon(Icons.flag, color: AppTheme.signalSoft),
+        color: AppMapStyle.startPin,
+        icon: Icons.flag,
       ),
-      Marker(
+      AppMapStyle.pin(
         point: LatLng(ride.destinationLat, ride.destinationLng),
-        width: 40,
-        height: 40,
-        child: const Icon(Icons.sports_score, color: AppTheme.signal),
+        color: AppMapStyle.endPin,
+        icon: Icons.sports_score,
       ),
       ...ride.stops.map(
-        (s) => Marker(
+        (s) => AppMapStyle.pin(
           point: LatLng(s.lat, s.lng),
-          width: 36,
-          height: 36,
-          child: Icon(
-            s.kind == 'fuel' ? Icons.local_gas_station : Icons.place,
-            color: AppTheme.fuel,
-            size: 28,
-          ),
+          color: AppTheme.fuel,
+          icon: s.kind == 'fuel' ? Icons.local_gas_station : Icons.place,
+          size: 34,
         ),
       ),
       ...riders.map((r) {
@@ -94,19 +89,10 @@ class RideMapView extends StatelessWidget {
                 ),
               ),
               children: [
-                TileLayer(
-                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  userAgentPackageName: 'com.groupride.mobile',
-                ),
+                AppMapStyle.tileLayer(),
                 if (route.length >= 2)
                   PolylineLayer(
-                    polylines: [
-                      Polyline(
-                        points: route,
-                        color: AppTheme.signal.withValues(alpha: 0.85),
-                        strokeWidth: 4,
-                      ),
-                    ],
+                    polylines: AppMapStyle.routePolylines(route),
                   ),
                 MarkerLayer(markers: markers),
               ],
