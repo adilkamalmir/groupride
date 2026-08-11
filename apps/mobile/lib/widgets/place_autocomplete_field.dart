@@ -72,6 +72,8 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
     if (_focus.hasFocus) {
       _scheduleSearch(widget.controller.text);
     } else {
+      _debounce?.cancel();
+      setState(() => _loading = false);
       Future<void>.delayed(const Duration(milliseconds: 150), () {
         if (!_focus.hasFocus) _removeOverlay();
       });
@@ -79,11 +81,14 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
   }
 
   void _onTextChanged() {
-    if (_selecting) return;
+    if (_selecting || !_focus.hasFocus) return;
     _scheduleSearch(widget.controller.text);
   }
 
   void _scheduleSearch(String raw) {
+    // Suggestions only while the field is actively selected.
+    if (!_focus.hasFocus) return;
+
     _debounce?.cancel();
     final q = raw.trim();
     final hasBias = widget.biasLat != null && widget.biasLng != null;
@@ -101,6 +106,7 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
   }
 
   Future<void> _runSearch(String q) async {
+    if (!_focus.hasFocus) return;
     final id = ++_requestId;
     try {
       final maps = context.read<MapsService>();
@@ -118,14 +124,12 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
           lng: widget.biasLng,
         );
       }
-      if (!mounted || id != _requestId) return;
+      if (!mounted || id != _requestId || !_focus.hasFocus) return;
       setState(() {
         _suggestions = results;
         _loading = false;
       });
-      if (_focus.hasFocus) {
-        _showOverlay();
-      }
+      _showOverlay();
     } catch (_) {
       if (!mounted || id != _requestId) return;
       setState(() {
@@ -260,7 +264,6 @@ class _PlaceAutocompleteFieldState extends State<PlaceAutocompleteField> {
               : const Icon(Icons.search, color: AppTheme.steel),
         ),
         textInputAction: TextInputAction.next,
-        onTap: () => _scheduleSearch(widget.controller.text),
       ),
     );
   }

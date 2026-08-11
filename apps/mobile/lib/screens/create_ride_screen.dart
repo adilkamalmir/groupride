@@ -38,7 +38,6 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
   bool _locating = true;
   String? _locationError;
   List<GeocodedPlace> _routeStopIdeas = const [];
-  List<PlaceSuggestion> _nearYou = const [];
 
   DateTime _startAt = DateTime.now().add(const Duration(days: 1)).copyWith(
         hour: 10,
@@ -97,32 +96,6 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
       _locating = false;
       _locationError = null;
     });
-    await _loadNearYou();
-  }
-
-  Future<void> _loadNearYou() async {
-    final lat = _hereLat;
-    final lng = _hereLng;
-    if (lat == null || lng == null) return;
-    try {
-      final near = await context.read<MapsService>().nearby(lat: lat, lng: lng);
-      if (!mounted) return;
-      setState(() {
-        _nearYou = near;
-        // Soft notice only — form remains usable with typed search.
-        if (near.isEmpty && _locationError == null) {
-          _locationError = 'No nearby suggestions yet — type a place name to search.';
-        }
-      });
-    } catch (e) {
-      if (!mounted) return;
-      // Never block create-ride on nearby failures; autocomplete still works.
-      setState(() {
-        _nearYou = const [];
-        _locationError =
-            'Nearby chips unavailable right now. Type a meeting point or destination to search.';
-      });
-    }
   }
 
   @override
@@ -201,23 +174,6 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
               _maybeLoadStopIdeas();
             },
           ),
-          if (_nearYou.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            const Text('Near you', style: TextStyle(color: AppTheme.steel, fontSize: 13)),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final s in _nearYou.take(6))
-                  ActionChip(
-                    avatar: const Icon(Icons.near_me, size: 16),
-                    label: Text(s.mainText ?? s.description),
-                    onPressed: () => _pickNearYou(s, isMeet: true),
-                  ),
-              ],
-            ),
-          ],
           const SizedBox(height: 12),
           PlaceAutocompleteField(
             controller: _dest,
@@ -231,20 +187,6 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
               _maybeLoadStopIdeas();
             },
           ),
-          if (_nearYou.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final s in _nearYou.take(6))
-                  ActionChip(
-                    label: Text(s.mainText ?? s.description),
-                    onPressed: () => _pickNearYou(s, isMeet: false),
-                  ),
-              ],
-            ),
-          ],
           const SizedBox(height: 20),
           Row(
             children: [
@@ -407,23 +349,6 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
       return (_meetPlace!.lng + _destPlace!.lng) / 2;
     }
     return _biasLng;
-  }
-
-  Future<void> _pickNearYou(PlaceSuggestion suggestion, {required bool isMeet}) async {
-    final maps = context.read<MapsService>();
-    final place = await maps.placeDetails(suggestion.placeId) ??
-        await maps.geocode(suggestion.description);
-    if (place == null || !mounted) return;
-    setState(() {
-      if (isMeet) {
-        _meetPlace = place;
-        _meet.text = place.formattedAddress;
-      } else {
-        _destPlace = place;
-        _dest.text = place.formattedAddress;
-      }
-    });
-    await _maybeLoadStopIdeas();
   }
 
   void _addSuggestedStop(GeocodedPlace idea) {
