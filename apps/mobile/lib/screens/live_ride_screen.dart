@@ -31,6 +31,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   bool _starting = true;
   bool _demoStarting = false;
   bool _fitted = false;
+  bool _locating = false;
   late final RideRealtimeService _realtime;
   late final LocationService _location;
 
@@ -187,6 +188,42 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       p.latitude.abs() <= 90 &&
       p.longitude.abs() <= 180;
 
+  LatLng? _myPoint(LocationService location) {
+    final pos = location.lastPosition;
+    if (pos == null) return null;
+    final point = LatLng(pos.latitude, pos.longitude);
+    return _isFinitePoint(point) ? point : null;
+  }
+
+  /// Jump the camera to device GPS (fresh fix when possible).
+  Future<void> _goToMyLocation() async {
+    if (_locating) return;
+    setState(() => _locating = true);
+    try {
+      final pos = await _location.currentPosition() ?? _location.lastPosition;
+      if (!mounted) return;
+      if (pos == null) {
+        setState(() => _banner = 'Could not get your current location');
+        return;
+      }
+      final point = LatLng(pos.latitude, pos.longitude);
+      if (!_isFinitePoint(point)) {
+        setState(() => _banner = 'Could not get your current location');
+        return;
+      }
+      _mapController.move(point, 14);
+    } catch (e) {
+      if (mounted) setState(() => _banner = 'Location failed: $e');
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
+  }
+
+  void _showPack() {
+    _fitted = false;
+    _fitToRiders();
+  }
+
   Future<void> _startDemo() async {
     setState(() {
       _demoStarting = true;
@@ -253,6 +290,23 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       ),
       ...riders.map(_riderMarker),
     ];
+
+    final mePoint = _myPoint(location);
+    if (mePoint != null) {
+      final alreadyShown = riders.any(
+        (r) => (r.lat - mePoint.latitude).abs() < 1e-5 && (r.lng - mePoint.longitude).abs() < 1e-5,
+      );
+      if (!alreadyShown) {
+        markers.add(
+          Marker(
+            point: mePoint,
+            width: 44,
+            height: 44,
+            child: const Icon(Icons.my_location, color: AppTheme.fuel, size: 28),
+          ),
+        );
+      }
+    }
 
     if (!_fitted && riders.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _fitToRiders());
@@ -393,6 +447,30 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                     ),
                   ),
                 const Spacer(),
+                Padding(
+                  padding: const EdgeInsets.only(right: 12, bottom: 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _MapControlButton(
+                          tooltip: 'Show pack',
+                          icon: Icons.groups_outlined,
+                          onPressed: _showPack,
+                        ),
+                        const SizedBox(height: 8),
+                        _MapControlButton(
+                          tooltip: 'My location',
+                          icon: Icons.my_location,
+                          loading: _locating,
+                          emphasized: true,
+                          onPressed: _locating ? null : _goToMyLocation,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
                 _ActionBar(
                   onEmergency: _showEmergency,
                   onRejoin: _rejoin,
@@ -555,6 +633,59 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       ),
     );
     if (msg != null && msg.isNotEmpty) await _realtime.announce(msg);
+  }
+}
+
+class _MapControlButton extends StatelessWidget {
+  const _MapControlButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.loading = false,
+    this.emphasized = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final bool loading;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: emphasized ? AppTheme.signal : AppTheme.asphalt.withValues(alpha: 0.92),
+      shape: const CircleBorder(),
+      elevation: 2,
+      shadowColor: Colors.black54,
+      child: Tooltip(
+        message: tooltip,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: Center(
+              child: loading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Icon(
+                      icon,
+                      color: emphasized ? Colors.white : AppTheme.mist,
+                      size: 22,
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
