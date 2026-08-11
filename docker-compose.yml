@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: groupride
+      POSTGRES_PASSWORD: groupride
+      POSTGRES_DB: groupride
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U groupride -d groupride"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: .
+      dockerfile: src/GroupRide.Api/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=groupride;Username=groupride;Password=groupride
+      ConnectionStrings__Redis: redis:6379
+      Jwt__Secret: GroupRideDevSecretKey_ChangeInProduction_AtLeast32Chars!
+      GoogleMaps__ApiKey: ${GOOGLE_MAPS_API_KEY:-}
+      GoogleMaps__IosApiKey: ${GOOGLE_MAPS_IOS_API_KEY:-${GOOGLE_MAPS_API_KEY:-}}
+      GoogleMaps__AndroidApiKey: ${GOOGLE_MAPS_ANDROID_API_KEY:-${GOOGLE_MAPS_API_KEY:-}}
+      ASPNETCORE_URLS: http://0.0.0.0:5080
+    ports:
+      - "5080:5080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  pgdata:
