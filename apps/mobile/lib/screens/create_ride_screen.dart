@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
+import '../config.dart';
 import '../services/location_service.dart';
 import '../services/maps_service.dart';
 import '../services/ride_service.dart';
@@ -34,8 +34,12 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
 
   GeocodedPlace? _meetPlace;
   GeocodedPlace? _destPlace;
-  Position? _here;
+  /// Always seeded with Ottawa simulator coords so suggestions are local even before GPS returns.
+  double _hereLat = AppConfig.defaultLat;
+  double _hereLng = AppConfig.defaultLng;
+  bool _usingLiveGps = false;
   List<GeocodedPlace> _routeStopIdeas = const [];
+  List<PlaceSuggestion> _nearYou = const [];
 
   DateTime _startAt = DateTime.now().add(const Duration(days: 1)).copyWith(
         hour: 10,
@@ -55,14 +59,33 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadLocation());
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _loadNearYou();
+      await _loadLocation();
+    });
   }
 
   Future<void> _loadLocation() async {
     if (!mounted) return;
     final pos = await context.read<LocationService>().currentPosition();
-    if (!mounted) return;
-    setState(() => _here = pos);
+    if (!mounted || pos == null) return;
+    setState(() {
+      _hereLat = pos.latitude;
+      _hereLng = pos.longitude;
+      _usingLiveGps = true;
+    });
+    await _loadNearYou();
+  }
+
+  Future<void> _loadNearYou() async {
+    try {
+      final near = await context.read<MapsService>().nearby(
+            lat: _hereLat,
+            lng: _hereLng,
+          );
+      if (!mounted) return;
+      setState(() => _nearYou = near);
+    } catch (_) {}
   }
 
   @override
@@ -76,11 +99,15 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     super.dispose();
   }
 
-  double? get _biasLat => _meetPlace?.lat ?? _here?.latitude;
-  double? get _biasLng => _meetPlace?.lng ?? _here?.longitude;
+  double get _biasLat => _meetPlace?.lat ?? _hereLat;
+  double get _biasLng => _meetPlace?.lng ?? _hereLng;
 
   @override
   Widget build(BuildContext context) {
+    final locationHint = _usingLiveGps
+        ? 'Near your GPS (${_hereLat.toStringAsFixed(2)}, ${_hereLng.toStringAsFixed(2)})'
+        : 'Near Ottawa simulator location (${_hereLat.toStringAsFixed(2)}, ${_hereLng.toStringAsFixed(2)})';
+
     return Scaffold(
       appBar: AppBar(title: const Text('Create ride')),
       body: ListView(
@@ -104,9 +131,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
           PlaceAutocompleteField(
             controller: _meet,
             label: 'Meeting point',
-            helperText: _here == null
-                ? 'Suggestions use Google Places'
-                : 'Suggestions near your current location',
+            helperText: locationHint,
             biasLat: _biasLat,
             biasLng: _biasLng,
             onPlaceSelected: (p) {
@@ -114,11 +139,28 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
               _maybeLoadStopIdeas();
             },
           ),
+          if (_nearYou.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text('Near you', style: const TextStyle(color: AppTheme.steel, fontSize: 13)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final s in _nearYou.take(6))
+                  ActionChip(
+                    avatar: const Icon(Icons.near_me, size: 16),
+                    label: Text(s.mainText ?? s.description),
+                    onPressed: () => _pickNearYou(s, isMeet: true),
+                  ),
+              ],
+            ),
+          ],
           const SizedBox(height: 12),
           PlaceAutocompleteField(
             controller: _dest,
             label: 'Destination',
-            helperText: 'Suggestions near you / meeting point',
+            helperText: locationHint,
             biasLat: _biasLat,
             biasLng: _biasLng,
             onPlaceSelected: (p) {
@@ -126,6 +168,20 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
               _maybeLoadStopIdeas();
             },
           ),
+          if (_nearYou.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final s in _nearYou.take(6))
+                  ActionChip(
+                    label: Text(s.mainText ?? s.description),
+                    onPressed: () => _pickNearYou(s, isMeet: false),
+                  ),
+              ],
+            ),
+          ],
           const SizedBox(height: 20),
           Row(
             children: [
@@ -270,7 +326,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     );
   }
 
-  double? get _stopBiasLat {
+  double get _stopBiasLat {
     if (_previewPath.length >= 2) {
       return _previewPath[_previewPath.length ~/ 2].latitude;
     }
@@ -280,7 +336,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     return _biasLat;
   }
 
-  double? get _stopBiasLng {
+  double get _stopBiasLng {
     if (_previewPath.length >= 2) {
       return _previewPath[_previewPath.length ~/ 2].longitude;
     }
@@ -288,6 +344,23 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
       return (_meetPlace!.lng + _destPlace!.lng) / 2;
     }
     return _biasLng;
+  }
+
+  Future<void> _pickNearYou(PlaceSuggestion suggestion, {required bool isMeet}) async {
+    final maps = context.read<MapsService>();
+    final place = await maps.placeDetails(suggestion.placeId) ??
+        await maps.geocode(suggestion.description);
+    if (place == null || !mounted) return;
+    setState(() {
+      if (isMeet) {
+        _meetPlace = place;
+        _meet.text = place.formattedAddress;
+      } else {
+        _destPlace = place;
+        _dest.text = place.formattedAddress;
+      }
+    });
+    await _maybeLoadStopIdeas();
   }
 
   void _addSuggestedStop(GeocodedPlace idea) {

@@ -77,24 +77,54 @@ public class LocalMapProvider : IMapProvider
         }
 
         var q = input.Trim();
-        var hits = KnownPlaces
+        var placeHits = KnownPlaces
             .Select(kv =>
             {
                 var d = biasLat is null || biasLng is null
                     ? 0
                     : Haversine(biasLat.Value, biasLng.Value, kv.Value.Lat, kv.Value.Lng);
-                return (kv, d);
+                return (Name: kv.Key, Address: kv.Value.Address, d);
             })
             .Where(x =>
-                x.kv.Key.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                x.kv.Value.Address.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                q.Contains(x.kv.Key, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(x => x.d)
-            .Select(x => new PlaceSuggestion(
-                $"local:{x.kv.Key}",
-                x.kv.Value.Address,
-                x.kv.Key,
-                x.kv.Value.Address))
+                x.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                x.Address.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                q.Contains(x.Name, StringComparison.OrdinalIgnoreCase));
+
+        var pointHits = KnownPoints
+            .Select(p =>
+            {
+                var d = biasLat is null || biasLng is null
+                    ? 0
+                    : Haversine(biasLat.Value, biasLng.Value, p.Lat, p.Lng);
+                return (p, d);
+            })
+            .Where(x =>
+                x.p.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                x.p.Kind.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                (q.Contains("gas", StringComparison.OrdinalIgnoreCase) && x.p.Kind == "gas") ||
+                (q.Contains("fuel", StringComparison.OrdinalIgnoreCase) && x.p.Kind == "gas") ||
+                (q.Contains("coffee", StringComparison.OrdinalIgnoreCase) && x.p.Name.Contains("Tim", StringComparison.OrdinalIgnoreCase)));
+
+        var hits = placeHits
+            .Select(x => new PlaceSuggestion($"local:{x.Name}", x.Address, x.Name, $"{x.d / 1000:0.0} km away"))
+            .Concat(pointHits.Select(x => new PlaceSuggestion(
+                $"local:{x.p.Name}",
+                x.p.Name,
+                x.p.Name,
+                $"{x.p.Kind} · {x.d / 1000:0.0} km")))
+            .GroupBy(s => s.PlaceId, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(s =>
+            {
+                var secondary = s.SecondaryText ?? "";
+                var idx = secondary.IndexOf(" km", StringComparison.Ordinal);
+                if (idx > 0)
+                {
+                    var num = secondary[..idx].Split(' ', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                    if (double.TryParse(num, out var km)) return km;
+                }
+                return 999d;
+            })
             .Take(6)
             .ToList();
 
@@ -105,19 +135,51 @@ public class LocalMapProvider : IMapProvider
         double lat, double lng, string? kind = null, CancellationToken ct = default)
     {
         var kindFilter = kind?.ToLowerInvariant();
-        var hits = KnownPoints
+        var fromPoints = KnownPoints
             .Select(p => p with { DistanceMeters = Haversine(lat, lng, p.Lat, p.Lng) })
+            .Where(p => p.DistanceMeters <= 40_000)
             .Where(p => kindFilter is null
                         || (kindFilter is "fuel" or "gas" && p.Kind == "gas")
                         || (kindFilter is "lunch" or "food" or "restaurant" && p.Kind is "rest" or "parking")
-                        || (kindFilter == "parking" && p.Kind == "parking"))
-            .OrderBy(p => p.DistanceMeters)
-            .Take(8)
+                        || (kindFilter == "parking" && p.Kind == "parking")
+                        || (kindFilter is "cafe" or "meeting" && p.Kind is "parking" or "rest"));
+
+        var fromPlaces = KnownPlaces
+            .Select(kv => (
+                Name: kv.Key,
+                Address: kv.Value.Address,
+                Lat: kv.Value.Lat,
+                Lng: kv.Value.Lng,
+                Distance: Haversine(lat, lng, kv.Value.Lat, kv.Value.Lng)))
+            .Where(p => p.Distance <= 40_000)
+            .Select(p => new PlaceSuggestion(
+                $"local:{p.Name}",
+                p.Address,
+                p.Name,
+                $"{p.Distance / 1000:0.0} km away"));
+
+        var hits = fromPoints
             .Select(p => new PlaceSuggestion(
                 $"local:{p.Name}",
                 p.Name,
                 p.Name,
-                $"{p.Kind} · {(p.DistanceMeters / 1000):0.0} km"))
+                $"{p.Kind} · {p.DistanceMeters / 1000:0.0} km"))
+            .Concat(fromPlaces)
+            .GroupBy(s => s.PlaceId, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(s =>
+            {
+                // Parse "X.Y km" from secondary when present for stable local ordering.
+                var secondary = s.SecondaryText ?? "";
+                var idx = secondary.IndexOf(" km", StringComparison.Ordinal);
+                if (idx > 0)
+                {
+                    var num = secondary[..idx].Split(' ').LastOrDefault();
+                    if (double.TryParse(num, out var km)) return km;
+                }
+                return 999d;
+            })
+            .Take(8)
             .ToList();
 
         return Task.FromResult<IReadOnlyList<PlaceSuggestion>>(hits);

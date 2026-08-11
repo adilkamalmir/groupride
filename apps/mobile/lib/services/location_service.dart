@@ -33,9 +33,21 @@ class LocationService extends ChangeNotifier {
   Future<Position?> currentPosition() async {
     final ok = await ensurePermission();
     if (!ok) return lastPosition;
+
+    try {
+      final last = await Geolocator.getLastKnownPosition();
+      if (last != null) {
+        lastPosition = last;
+        notifyListeners();
+      }
+    } catch (_) {}
+
     try {
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 4),
+        ),
       );
       lastPosition = pos;
       notifyListeners();

@@ -67,8 +67,17 @@ public class GoogleMapsProvider : IMapProvider
         if (!IsConfigured)
             return await _fallback.AutocompleteAsync(input, biasLat, biasLng, ct);
 
+        // When we know the user's location, prefer Text Search / Nearby (true local results).
+        // Classic Autocomplete only lightly biases by location and often returns far-away hits.
+        if (biasLat is not null && biasLng is not null)
+        {
+            var local = await LocalTextSearchAsync(input.Trim(), biasLat.Value, biasLng.Value, ct);
+            if (local.Count > 0)
+                return local;
+        }
+
         var bias = biasLat is not null && biasLng is not null
-            ? $"&location={biasLat.Value.ToString(CultureInfo.InvariantCulture)},{biasLng.Value.ToString(CultureInfo.InvariantCulture)}&radius=50000"
+            ? $"&location={biasLat.Value.ToString(CultureInfo.InvariantCulture)},{biasLng.Value.ToString(CultureInfo.InvariantCulture)}&radius=25000&origin={biasLat.Value.ToString(CultureInfo.InvariantCulture)},{biasLng.Value.ToString(CultureInfo.InvariantCulture)}"
             : string.Empty;
 
         var url =
@@ -108,32 +117,96 @@ public class GoogleMapsProvider : IMapProvider
             "fuel" or "gas" => "gas_station",
             "lunch" or "food" or "restaurant" => "restaurant",
             "parking" => "parking",
-            _ => "point_of_interest"
+            // Meeting points: cafes / parking near the rider work better than generic POI noise.
+            _ => "cafe"
         };
 
+        var results = await NearbySearchAsync(lat, lng, type, keyword: null, radiusMeters: 12000, ct);
+        if (results.Count == 0 && type == "cafe")
+            results = await NearbySearchAsync(lat, lng, "parking", keyword: null, radiusMeters: 12000, ct);
+        if (results.Count == 0)
+            return await _fallback.NearbySuggestionsAsync(lat, lng, kind, ct);
+        return results;
+    }
+
+    private async Task<IReadOnlyList<PlaceSuggestion>> LocalTextSearchAsync(
+        string input, double lat, double lng, CancellationToken ct)
+    {
+        var loc = $"{lat.ToString(CultureInfo.InvariantCulture)},{lng.ToString(CultureInfo.InvariantCulture)}";
+        // Text Search ranks by relevance near location; Nearby+keyword is a strong fallback.
+        var textUrl =
+            $"https://maps.googleapis.com/maps/api/place/textsearch/json?query={Uri.EscapeDataString(input)}&location={loc}&radius=25000&key={_apiKey}";
+        try
+        {
+            using var res = await _http.GetAsync(textUrl, ct);
+            if (res.IsSuccessStatusCode)
+            {
+                var payload = await res.Content.ReadFromJsonAsync<PlacesNearbyResponse>(cancellationToken: ct);
+                var fromText = MapPlaceResults(payload?.Results, lat, lng);
+                if (fromText.Count > 0)
+                    return fromText;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Text search failed for {Input}", input);
+        }
+
+        return await NearbySearchAsync(lat, lng, type: null, keyword: input, radiusMeters: 25000, ct);
+    }
+
+    private async Task<IReadOnlyList<PlaceSuggestion>> NearbySearchAsync(
+        double lat, double lng, string? type, string? keyword, int radiusMeters, CancellationToken ct)
+    {
+        var loc = $"{lat.ToString(CultureInfo.InvariantCulture)},{lng.ToString(CultureInfo.InvariantCulture)}";
+        var typeQs = string.IsNullOrWhiteSpace(type) ? string.Empty : $"&type={Uri.EscapeDataString(type)}";
+        var keywordQs = string.IsNullOrWhiteSpace(keyword) ? string.Empty : $"&keyword={Uri.EscapeDataString(keyword)}";
         var url =
-            $"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={lat.ToString(CultureInfo.InvariantCulture)},{lng.ToString(CultureInfo.InvariantCulture)}&radius=8000&type={type}&key={_apiKey}";
+            $"https://maps.googleapis.com/maps/api/place/nearbysearch/json?location={loc}&radius={radiusMeters}{typeQs}{keywordQs}&key={_apiKey}";
         try
         {
             using var res = await _http.GetAsync(url, ct);
             if (!res.IsSuccessStatusCode)
-                return await _fallback.NearbySuggestionsAsync(lat, lng, kind, ct);
+                return Array.Empty<PlaceSuggestion>();
             var payload = await res.Content.ReadFromJsonAsync<PlacesNearbyResponse>(cancellationToken: ct);
-            return (payload?.Results ?? new List<PlaceResult>())
-                .Where(p => p.Geometry?.Location is not null && !string.IsNullOrWhiteSpace(p.Name))
-                .Take(8)
-                .Select(p => new PlaceSuggestion(
-                    p.PlaceId ?? $"nearby:{p.Name}",
-                    p.Vicinity is null ? p.Name! : $"{p.Name}, {p.Vicinity}",
-                    p.Name,
-                    p.Vicinity))
-                .ToList();
+            return MapPlaceResults(payload?.Results, lat, lng);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Nearby suggestions failed");
-            return await _fallback.NearbySuggestionsAsync(lat, lng, kind, ct);
+            _logger.LogWarning(ex, "Nearby search failed");
+            return Array.Empty<PlaceSuggestion>();
         }
+    }
+
+    private static IReadOnlyList<PlaceSuggestion> MapPlaceResults(
+        List<PlaceResult>? results, double biasLat, double biasLng)
+    {
+        return (results ?? new List<PlaceResult>())
+            .Where(p => p.Geometry?.Location is not null && !string.IsNullOrWhiteSpace(p.Name))
+            .Select(p =>
+            {
+                var d = Haversine(biasLat, biasLng, p.Geometry!.Location!.Lat, p.Geometry.Location.Lng);
+                var area = p.Vicinity ?? p.FormattedAddress ?? string.Empty;
+                var secondary = area;
+                if (d > 0)
+                {
+                    var km = d / 1000.0;
+                    secondary = string.IsNullOrWhiteSpace(area)
+                        ? $"{km:0.0} km away"
+                        : $"{area} · {km:0.0} km";
+                }
+                return (
+                    Suggestion: new PlaceSuggestion(
+                        p.PlaceId ?? $"nearby:{p.Name}",
+                        string.IsNullOrWhiteSpace(area) ? p.Name! : $"{p.Name}, {area}",
+                        p.Name,
+                        secondary),
+                    Distance: d);
+            })
+            .OrderBy(x => x.Distance)
+            .Take(8)
+            .Select(x => x.Suggestion)
+            .ToList();
     }
 
     public async Task<IReadOnlyList<GeocodedPlace>> SuggestStopsAlongRouteAsync(
@@ -429,6 +502,8 @@ public class GoogleMapsProvider : IMapProvider
         [JsonPropertyName("place_id")]
         public string? PlaceId { get; set; }
         public string? Vicinity { get; set; }
+        [JsonPropertyName("formatted_address")]
+        public string? FormattedAddress { get; set; }
         public GeometryBlock? Geometry { get; set; }
     }
 

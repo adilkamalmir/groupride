@@ -23,6 +23,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\GroupRide.Cohesion\GroupRide.Cohesion.csproj" />
     <ProjectReference Include="..\..\src\GroupRide.Domain\GroupRide.Domain.csproj" />
+    <ProjectReference Include="..\..\src\GroupRide.Infrastructure\GroupRide.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>
