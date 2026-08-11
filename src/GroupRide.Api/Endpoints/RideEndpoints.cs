@@ -5,6 +5,7 @@ using System.Text.Json;
 using GroupRide.Api.Auth;
 using GroupRide.Api.Dtos;
 using GroupRide.Api.Hubs;
+using GroupRide.Api.Services;
 using GroupRide.Cohesion;
 using GroupRide.Domain.Entities;
 using GroupRide.Domain.Enums;
@@ -223,6 +224,19 @@ public static class RideEndpoints
             await db.SaveChangesAsync();
             return Results.Ok(MapRide(await LoadRide(db, id)!));
         });
+
+        g.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, AppDbContext db) =>
+            await DeleteRideAsync(id, principal, db));
+
+        // Alias for environments that block HTTP DELETE.
+        g.MapPost("/{id:guid}/delete", async (Guid id, ClaimsPrincipal principal, AppDbContext db) =>
+            await DeleteRideAsync(id, principal, db));
+
+        g.MapPost("/{id:guid}/demo", async (Guid id, ClaimsPrincipal principal, DemoRideSimulator demo) =>
+            await StartDemoAsync(id, principal, demo));
+
+        g.MapPost("/{id:guid}/start-demo", async (Guid id, ClaimsPrincipal principal, DemoRideSimulator demo) =>
+            await StartDemoAsync(id, principal, demo));
 
         g.MapPost("/{id:guid}/roles", async (Guid id, AssignRoleRequest req, ClaimsPrincipal principal, AppDbContext db, IHubContext<RideHub> hub) =>
         {
@@ -526,6 +540,54 @@ public static class RideEndpoints
         return g;
     }
 
+    private static async Task<IResult> DeleteRideAsync(Guid id, ClaimsPrincipal principal, AppDbContext db)
+    {
+        var userId = principal.GetUserId();
+        var ride = await db.Rides
+            .Include(r => r.Members)
+            .Include(r => r.Stops)
+            .Include(r => r.Invites)
+            .Include(r => r.Alerts)
+            .Include(r => r.Emergencies)
+            .Include(r => r.Timeline)
+            .FirstOrDefaultAsync(r => r.Id == id);
+        if (ride is null) return Results.NotFound(new { error = "Ride not found" });
+
+        var me = ride.Members.FirstOrDefault(m => m.UserId == userId);
+        if (me is null)
+            return Results.Json(new { error = "You are not a member of this ride." }, statusCode: StatusCodes.Status403Forbidden);
+
+        var canDelete = me.Role == RideRole.Leader || ride.CreatedByUserId == userId;
+        if (!canDelete)
+            return Results.Json(new { error = "Only the ride leader can delete this ride." }, statusCode: StatusCodes.Status403Forbidden);
+
+        var pings = await db.LocationPings.Where(p => p.RideId == id).ToListAsync();
+        if (pings.Count > 0)
+            db.LocationPings.RemoveRange(pings);
+
+        db.Rides.Remove(ride);
+        await db.SaveChangesAsync();
+        return Results.NoContent();
+    }
+
+    private static async Task<IResult> StartDemoAsync(Guid id, ClaimsPrincipal principal, DemoRideSimulator demo)
+    {
+        var userId = principal.GetUserId();
+        try
+        {
+            await demo.StartAsync(id, userId);
+            return Results.Accepted($"/api/rides/{id}", new { rideId = id, demo = true });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Results.Json(new { error = "Only the ride leader can start a demo." }, statusCode: StatusCodes.Status403Forbidden);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    }
+
     private static async Task<Ride?> LoadRide(AppDbContext db, Guid id) =>
         await db.Rides
             .Include(r => r.Stops)
@@ -551,7 +613,9 @@ public static class RideEndpoints
 
     private static string GenerateToken()
     {
-        var bytes = RandomNumberGenerator.GetBytes(9);
-        return Convert.ToBase64String(bytes).Replace("+", "").Replace("/", "").Replace("=", "")[..12].ToLowerInvariant();
+        // Keep only URL-safe chars without shrinking length (old Replace→[..12] could throw).
+        var bytes = RandomNumberGenerator.GetBytes(12);
+        var raw = Convert.ToHexString(bytes).ToLowerInvariant();
+        return raw[..12];
     }
 }

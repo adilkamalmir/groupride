@@ -2,6 +2,7 @@ using System.Text;
 using GroupRide.Api.Auth;
 using GroupRide.Api.Endpoints;
 using GroupRide.Api.Hubs;
+using GroupRide.Api.Services;
 using GroupRide.Cohesion;
 using GroupRide.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -15,6 +16,7 @@ builder.Services.AddSingleton<SplitDetector>();
 builder.Services.AddSingleton<FuelAnalyzer>();
 builder.Services.AddSingleton<CohesionStateTracker>();
 builder.Services.AddSingleton<JwtTokenService>();
+builder.Services.AddSingleton<DemoRideSimulator>();
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>

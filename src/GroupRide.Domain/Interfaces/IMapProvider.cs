@@ -13,7 +13,22 @@ public interface IMapProvider
 
     /// <summary>Place name autocomplete suggestions (Google Places or local fallback).</summary>
     Task<IReadOnlyList<PlaceSuggestion>> AutocompleteAsync(
-        string input, CancellationToken ct = default);
+        string input,
+        double? biasLat = null,
+        double? biasLng = null,
+        CancellationToken ct = default);
+
+    /// <summary>Nearby place suggestions around a point (for empty-field focus / current location).</summary>
+    Task<IReadOnlyList<PlaceSuggestion>> NearbySuggestionsAsync(
+        double lat,
+        double lng,
+        string? kind = null,
+        CancellationToken ct = default);
+
+    /// <summary>Suggest fuel/food stops near sample points along a route path.</summary>
+    Task<IReadOnlyList<GeocodedPlace>> SuggestStopsAlongRouteAsync(
+        IReadOnlyList<LatLngPoint> path,
+        CancellationToken ct = default);
 
     /// <summary>Resolve a place_id from autocomplete to lat/lng + address.</summary>
     Task<GeocodedPlace?> GetPlaceDetailsAsync(string placeId, CancellationToken ct = default);

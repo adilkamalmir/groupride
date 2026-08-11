@@ -10,12 +10,16 @@ public class LocalMapProvider : IMapProvider
 {
     private static readonly RegroupPointCandidate[] KnownPoints =
     [
-        new("Tim Hortons Kanata", "parking", 45.3001, -75.9105, 0),
+        new("Tim Hortons Kanata", "cafe", 45.3001, -75.9105, 0),
         new("Canadian Tire Gas Barrhaven", "gas", 45.2750, -75.7360, 0),
         new("Renfrew Petro-Canada", "gas", 45.4747, -76.6831, 0),
         new("Calabogie Motorsports Park", "parking", 45.3008, -76.7175, 0),
         new("Arnprior Rest Stop", "rest", 45.4333, -76.3500, 0),
         new("Mississippi Mills Parking", "parking", 45.2260, -76.1940, 0),
+        new("Champlain Lookout", "viewpoint", 45.4890, -75.8670, 0),
+        new("Ottawa River Parkway View", "viewpoint", 45.4100, -75.7500, 0),
+        new("Bridgehead Coffee Westboro", "cafe", 45.3930, -75.7550, 0),
+        new("The Works Gatineau", "food", 45.4280, -75.7100, 0),
     ];
 
     private static readonly Dictionary<string, (double Lat, double Lng, string Address)> KnownPlaces = new(StringComparer.OrdinalIgnoreCase)
@@ -64,26 +68,153 @@ public class LocalMapProvider : IMapProvider
     }
 
     public Task<IReadOnlyList<PlaceSuggestion>> AutocompleteAsync(
-        string input, CancellationToken ct = default)
+        string input,
+        double? biasLat = null,
+        double? biasLng = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(input) || input.Trim().Length < 2)
+        {
+            if (biasLat is not null && biasLng is not null)
+                return NearbySuggestionsAsync(biasLat.Value, biasLng.Value, null, ct);
             return Task.FromResult<IReadOnlyList<PlaceSuggestion>>(Array.Empty<PlaceSuggestion>());
+        }
 
         var q = input.Trim();
-        var hits = KnownPlaces
-            .Where(kv =>
-                kv.Key.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                kv.Value.Address.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                q.Contains(kv.Key, StringComparison.OrdinalIgnoreCase))
-            .Select(kv => new PlaceSuggestion(
-                $"local:{kv.Key}",
-                kv.Value.Address,
-                kv.Key,
-                kv.Value.Address))
+        var placeHits = KnownPlaces
+            .Select(kv =>
+            {
+                var d = biasLat is null || biasLng is null
+                    ? 0
+                    : Haversine(biasLat.Value, biasLng.Value, kv.Value.Lat, kv.Value.Lng);
+                return (Name: kv.Key, Address: kv.Value.Address, d);
+            })
+            .Where(x =>
+                x.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                x.Address.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                q.Contains(x.Name, StringComparison.OrdinalIgnoreCase));
+
+        var pointHits = KnownPoints
+            .Select(p =>
+            {
+                var d = biasLat is null || biasLng is null
+                    ? 0
+                    : Haversine(biasLat.Value, biasLng.Value, p.Lat, p.Lng);
+                return (p, d);
+            })
+            .Where(x =>
+                x.p.Name.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                x.p.Kind.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                (q.Contains("gas", StringComparison.OrdinalIgnoreCase) && x.p.Kind == "gas") ||
+                (q.Contains("fuel", StringComparison.OrdinalIgnoreCase) && x.p.Kind == "gas") ||
+                (q.Contains("coffee", StringComparison.OrdinalIgnoreCase) && x.p.Name.Contains("Tim", StringComparison.OrdinalIgnoreCase)));
+
+        var hits = placeHits
+            .Select(x => new PlaceSuggestion($"local:{x.Name}", x.Address, x.Name, $"{x.d / 1000:0.0} km away"))
+            .Concat(pointHits.Select(x => new PlaceSuggestion(
+                $"local:{x.p.Name}",
+                x.p.Name,
+                x.p.Name,
+                $"{x.p.Kind} · {x.d / 1000:0.0} km")))
+            .GroupBy(s => s.PlaceId, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(s =>
+            {
+                var secondary = s.SecondaryText ?? "";
+                var idx = secondary.IndexOf(" km", StringComparison.Ordinal);
+                if (idx > 0)
+                {
+                    var num = secondary[..idx].Split(' ', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                    if (double.TryParse(num, out var km)) return km;
+                }
+                return 999d;
+            })
             .Take(6)
             .ToList();
 
         return Task.FromResult<IReadOnlyList<PlaceSuggestion>>(hits);
+    }
+
+    public Task<IReadOnlyList<PlaceSuggestion>> NearbySuggestionsAsync(
+        double lat, double lng, string? kind = null, CancellationToken ct = default)
+    {
+        var kindFilter = kind?.ToLowerInvariant();
+        var fromPoints = KnownPoints
+            .Select(p => p with { DistanceMeters = Haversine(lat, lng, p.Lat, p.Lng) })
+            .Where(p => p.DistanceMeters <= 40_000)
+            .Where(p =>
+            {
+                if (kindFilter is null) return true;
+                return kindFilter switch
+                {
+                    "fuel" or "gas" => p.Kind == "gas",
+                    "lunch" or "food" or "restaurant" => p.Kind is "food" or "rest" or "parking",
+                    "coffee" or "cafe" => p.Kind is "cafe" or "rest",
+                    "viewpoint" or "views" or "scenic" or "lookout" => p.Kind == "viewpoint",
+                    "parking" => p.Kind == "parking",
+                    "rest" => p.Kind is "rest" or "parking",
+                    "meeting" => p.Kind is "cafe" or "parking" or "rest",
+                    _ => true
+                };
+            });
+
+        var fromPlaces = KnownPlaces
+            .Select(kv => (
+                Name: kv.Key,
+                Address: kv.Value.Address,
+                Lat: kv.Value.Lat,
+                Lng: kv.Value.Lng,
+                Distance: Haversine(lat, lng, kv.Value.Lat, kv.Value.Lng)))
+            .Where(p => p.Distance <= 40_000)
+            .Select(p => new PlaceSuggestion(
+                $"local:{p.Name}",
+                p.Address,
+                p.Name,
+                $"{p.Distance / 1000:0.0} km away"));
+
+        var hits = fromPoints
+            .Select(p => new PlaceSuggestion(
+                $"local:{p.Name}",
+                p.Name,
+                p.Name,
+                $"{p.Kind} · {p.DistanceMeters / 1000:0.0} km"))
+            .Concat(fromPlaces)
+            .GroupBy(s => s.PlaceId, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .OrderBy(s =>
+            {
+                // Parse "X.Y km" from secondary when present for stable local ordering.
+                var secondary = s.SecondaryText ?? "";
+                var idx = secondary.IndexOf(" km", StringComparison.Ordinal);
+                if (idx > 0)
+                {
+                    var num = secondary[..idx].Split(' ').LastOrDefault();
+                    if (double.TryParse(num, out var km)) return km;
+                }
+                return 999d;
+            })
+            .Take(8)
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<PlaceSuggestion>>(hits);
+    }
+
+    public Task<IReadOnlyList<GeocodedPlace>> SuggestStopsAlongRouteAsync(
+        IReadOnlyList<LatLngPoint> path, CancellationToken ct = default)
+    {
+        if (path.Count == 0)
+            return Task.FromResult<IReadOnlyList<GeocodedPlace>>(Array.Empty<GeocodedPlace>());
+
+        var mid = path[path.Count / 2];
+        var stops = KnownPoints
+            .Where(p => p.Kind is "gas" or "rest" or "parking")
+            .Select(p => p with { DistanceMeters = Haversine(mid.Lat, mid.Lng, p.Lat, p.Lng) })
+            .OrderBy(p => p.DistanceMeters)
+            .Take(6)
+            .Select(p => new GeocodedPlace(p.Name, p.Name, p.Lat, p.Lng, $"local:{p.Name}"))
+            .ToList();
+
+        return Task.FromResult<IReadOnlyList<GeocodedPlace>>(stops);
     }
 
     public Task<GeocodedPlace?> GetPlaceDetailsAsync(string placeId, CancellationToken ct = default)
@@ -93,6 +224,12 @@ public class LocalMapProvider : IMapProvider
             var key = placeId["local:".Length..];
             if (KnownPlaces.TryGetValue(key, out var hit))
                 return Task.FromResult<GeocodedPlace?>(new GeocodedPlace(key, hit.Address, hit.Lat, hit.Lng, placeId));
+
+            var point = KnownPoints.FirstOrDefault(p =>
+                p.Name.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (point is not null)
+                return Task.FromResult<GeocodedPlace?>(
+                    new GeocodedPlace(point.Name, point.Name, point.Lat, point.Lng, placeId));
         }
 
         return GeocodeAsync(placeId, ct);

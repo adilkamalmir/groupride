@@ -30,6 +30,30 @@ class RideService {
     return Ride.fromJson(data as Map<String, dynamic>);
   }
 
+  Future<void> deleteRide(String id) async {
+    try {
+      await _api.delete('/api/rides/$id');
+    } on ApiException catch (e) {
+      if (e.statusCode == 404 || e.statusCode == 405) {
+        await _api.post('/api/rides/$id/delete');
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> startDemo(String id) async {
+    try {
+      await _api.post('/api/rides/$id/demo', {});
+    } on ApiException catch (e) {
+      if (e.statusCode == 404 || e.statusCode == 405) {
+        await _api.post('/api/rides/$id/start-demo', {});
+        return;
+      }
+      rethrow;
+    }
+  }
+
   Future<Ride> assignRole(String rideId, String userId, String role) async {
     final data = await _api.post('/api/rides/$rideId/roles', {
       'userId': userId,

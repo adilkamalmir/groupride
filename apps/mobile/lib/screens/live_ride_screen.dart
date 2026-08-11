@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -7,16 +8,20 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/models.dart';
+import '../services/api_client.dart';
 import '../services/auth_service.dart';
 import '../services/location_service.dart';
 import '../services/ride_realtime_service.dart';
 import '../services/ride_service.dart';
 import '../theme.dart';
+import '../widgets/app_map_style.dart';
+import '../widgets/rider_letter_marker.dart';
 import 'timeline_screen.dart';
 
 class LiveRideScreen extends StatefulWidget {
-  const LiveRideScreen({super.key, required this.rideId});
+  const LiveRideScreen({super.key, required this.rideId, this.autoStartDemo = false});
   final String rideId;
+  final bool autoStartDemo;
 
   @override
   State<LiveRideScreen> createState() => _LiveRideScreenState();
@@ -28,6 +33,12 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   String? _banner;
   String? _activeEmergencyId;
   bool _starting = true;
+  bool _demoStarting = false;
+  bool _fitted = false;
+  bool _locating = false;
+  bool _localDemo = false;
+  List<RiderLocation> _demoRiders = const [];
+  Timer? _demoTimer;
   late final RideRealtimeService _realtime;
   late final LocationService _location;
 
@@ -61,10 +72,19 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     await _location.start(intervalSeconds: ride.pingIntervalSeconds);
     setState(() => _starting = false);
     _realtime.addListener(_onRealtime);
+    if (widget.autoStartDemo) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _startDemo();
+      });
+    }
   }
 
   void _onRealtime() {
     final rt = _realtime;
+    if (rt.rideCompleted) {
+      _goToTimeline();
+      return;
+    }
     if (rt.alerts.isNotEmpty) {
       setState(() => _banner = rt.alerts.first.message);
     }
@@ -81,10 +101,24 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     if (rt.lastFuelMessage != null) {
       setState(() => _banner = rt.lastFuelMessage);
     }
+    setState(() {});
+    // Fit once when we first get riders; avoid refitting every ping (NaN/Infinity risk).
+    if (!_fitted) {
+      _fitToRiders();
+    }
+  }
+
+  Future<void> _goToTimeline() async {
+    if (!mounted) return;
+    _realtime.removeListener(_onRealtime);
+    await Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => TimelineScreen(rideId: widget.rideId)),
+    );
   }
 
   @override
   void dispose() {
+    _demoTimer?.cancel();
     _realtime.removeListener(_onRealtime);
     _location.stop();
     _realtime.disconnect();
@@ -110,6 +144,230 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     ];
   }
 
+  List<RiderLocation> _visibleRiders(Ride ride, RideRealtimeService realtime) {
+    if (_localDemo && _demoRiders.isNotEmpty) return _demoRiders;
+    final source = realtime.riders.isNotEmpty ? realtime.riders : ride.knownRiderLocations();
+    return source
+        .where((r) => r.lat.isFinite && r.lng.isFinite && r.lat.abs() <= 90 && r.lng.abs() <= 180)
+        .toList();
+  }
+
+  void _fitToRiders() {
+    final ride = _ride;
+    if (ride == null) return;
+    final riders = _visibleRiders(ride, _realtime);
+    final points = <LatLng>[
+      ...riders.map((r) => LatLng(r.lat, r.lng)),
+      if (_location.lastPosition != null)
+        LatLng(_location.lastPosition!.latitude, _location.lastPosition!.longitude),
+    ].where(_isFinitePoint).toList();
+    if (points.isEmpty) return;
+
+    try {
+      if (points.length == 1) {
+        _mapController.move(points.first, 13);
+        _fitted = true;
+        return;
+      }
+
+      final bounds = LatLngBounds.fromPoints(points);
+      if (!_isFinitePoint(bounds.northWest) ||
+          !_isFinitePoint(bounds.southEast) ||
+          ((bounds.north - bounds.south).abs() < 1e-8 &&
+              (bounds.east - bounds.west).abs() < 1e-8)) {
+        _mapController.move(points.first, 13);
+        _fitted = true;
+        return;
+      }
+
+      _mapController.fitCamera(
+        CameraFit.bounds(
+          bounds: bounds,
+          padding: const EdgeInsets.all(48),
+          maxZoom: 14,
+        ),
+      );
+      _fitted = true;
+    } catch (_) {
+      // Never let map camera math crash the live ride UI.
+      try {
+        _mapController.move(points.first, 12);
+      } catch (_) {}
+    }
+  }
+
+  static bool _isFinitePoint(LatLng p) =>
+      p.latitude.isFinite &&
+      p.longitude.isFinite &&
+      p.latitude.abs() <= 90 &&
+      p.longitude.abs() <= 180;
+
+  LatLng? _myPoint(LocationService location) {
+    final pos = location.lastPosition;
+    if (pos == null) return null;
+    final point = LatLng(pos.latitude, pos.longitude);
+    return _isFinitePoint(point) ? point : null;
+  }
+
+  /// Jump the camera to device GPS (fresh fix when possible).
+  Future<void> _goToMyLocation() async {
+    if (_locating) return;
+    setState(() => _locating = true);
+    try {
+      final pos = await _location.currentPosition() ?? _location.lastPosition;
+      if (!mounted) return;
+      if (pos == null) {
+        setState(() => _banner = 'Could not get your current location');
+        return;
+      }
+      final point = LatLng(pos.latitude, pos.longitude);
+      if (!_isFinitePoint(point)) {
+        setState(() => _banner = 'Could not get your current location');
+        return;
+      }
+      _mapController.move(point, 14);
+    } catch (e) {
+      if (mounted) setState(() => _banner = 'Location failed: $e');
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
+  }
+
+  void _showPack() {
+    _fitted = false;
+    _fitToRiders();
+  }
+
+  void _zoomBy(double delta) {
+    try {
+      final cam = _mapController.camera;
+      final next = (cam.zoom + delta).clamp(3.0, 18.0);
+      _mapController.move(cam.center, next);
+    } catch (_) {}
+  }
+
+  Future<void> _startDemo() async {
+    setState(() {
+      _demoStarting = true;
+      _banner = 'Demo run starting — watch the pack move along the route';
+    });
+    try {
+      await context.read<RideService>().startDemo(widget.rideId);
+      final ride = await context.read<RideService>().getRide(widget.rideId);
+      if (mounted) setState(() => _ride = ride);
+    } on ApiException catch (e) {
+      if (e.statusCode == 404 || e.statusCode == 405) {
+        // API image missing demo endpoints — animate locally, then end the ride.
+        await _startLocalDemo();
+      } else if (mounted) {
+        setState(() => _banner = 'Demo failed: $e');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _banner = 'Demo failed: $e');
+    } finally {
+      if (mounted) setState(() => _demoStarting = false);
+    }
+  }
+
+  Future<void> _startLocalDemo() async {
+    final ride = _ride;
+    if (ride == null) return;
+
+    try {
+      await context.read<RideService>().startRide(widget.rideId);
+    } catch (_) {
+      // Already live is fine.
+    }
+
+    final path = _routePoints(ride);
+    if (path.length < 2) {
+      if (mounted) setState(() => _banner = 'Demo needs a route with meet + destination');
+      return;
+    }
+
+    final me = context.read<AuthService>().userId ?? 'me';
+    final meMembers = ride.members.where((m) => m.userId == me);
+    final meName = meMembers.isEmpty ? 'You' : meMembers.first.displayName;
+
+    const pack = [
+      ('demo-alex', 'Alex', 'Leader'),
+      ('demo-sam', 'Sam', 'Rider'),
+      ('demo-jordan', 'Jordan', 'Sweep'),
+    ];
+
+    LatLng pointAt(double t) {
+      final clamped = t.clamp(0.0, 1.0);
+      final exact = clamped * (path.length - 1);
+      final i = exact.floor().clamp(0, path.length - 2);
+      final f = exact - i;
+      final a = path[i];
+      final b = path[i + 1];
+      return LatLng(
+        a.latitude + (b.latitude - a.latitude) * f,
+        a.longitude + (b.longitude - a.longitude) * f,
+      );
+    }
+
+    setState(() {
+      _localDemo = true;
+      _banner = 'Local demo run — pack moving along your route';
+      _fitted = false;
+    });
+
+    const steps = 24;
+    var step = 0;
+    _demoTimer?.cancel();
+    _demoTimer = Timer.periodic(const Duration(milliseconds: 900), (timer) async {
+      step++;
+      final progress = step / steps;
+      final riders = <RiderLocation>[];
+      for (var i = 0; i < pack.length; i++) {
+        final p = pointAt((progress - i * 0.04).clamp(0.0, 1.0));
+        riders.add(
+          RiderLocation(
+            userId: pack[i].$1,
+            displayName: pack[i].$2,
+            role: pack[i].$3,
+            status: 'Riding',
+            lat: p.latitude,
+            lng: p.longitude,
+          ),
+        );
+      }
+      final mePoint = pointAt(progress);
+      riders.add(
+        RiderLocation(
+          userId: me,
+          displayName: meName,
+          role: 'Leader',
+          status: 'Riding',
+          lat: mePoint.latitude,
+          lng: mePoint.longitude,
+        ),
+      );
+
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() => _demoRiders = riders);
+      if (!_fitted) _fitToRiders();
+
+      if (step >= steps) {
+        timer.cancel();
+        try {
+          await context.read<RideService>().endRide(widget.rideId);
+        } catch (_) {}
+        if (!mounted) return;
+        setState(() {
+          _localDemo = false;
+          _banner = 'Demo complete';
+        });
+        await _goToTimeline();
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final ride = _ride;
@@ -125,37 +383,58 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    final center = location.lastPosition != null
-        ? LatLng(location.lastPosition!.latitude, location.lastPosition!.longitude)
-        : LatLng(ride.meetLat, ride.meetLng);
+    final riders = _visibleRiders(ride, realtime);
+    final center = riders.isNotEmpty
+        ? LatLng(riders.first.lat, riders.first.lng)
+        : location.lastPosition != null
+            ? LatLng(location.lastPosition!.latitude, location.lastPosition!.longitude)
+            : LatLng(ride.meetLat, ride.meetLng);
     final route = _routePoints(ride);
 
     final markers = <Marker>[
-      Marker(
+      AppMapStyle.pin(
         point: LatLng(ride.meetLat, ride.meetLng),
-        width: 36,
-        height: 36,
-        child: const Icon(Icons.flag, color: AppTheme.signalSoft),
+        color: AppMapStyle.startPin,
+        icon: Icons.flag,
+        size: 36,
       ),
-      Marker(
+      AppMapStyle.pin(
         point: LatLng(ride.destinationLat, ride.destinationLng),
-        width: 36,
-        height: 36,
-        child: const Icon(Icons.sports_score, color: AppTheme.signal),
+        color: AppMapStyle.endPin,
+        icon: Icons.sports_score,
+        size: 36,
       ),
       ...ride.stops.map(
-        (s) => Marker(
+        (s) => AppMapStyle.pin(
           point: LatLng(s.lat, s.lng),
-          width: 36,
-          height: 36,
-          child: Icon(
-            s.kind == 'fuel' ? Icons.local_gas_station : Icons.place,
-            color: AppTheme.fuel,
-          ),
+          color: AppTheme.fuel,
+          icon: s.kind == 'fuel' ? Icons.local_gas_station : Icons.place,
+          size: 32,
         ),
       ),
-      ...realtime.riders.map(_riderMarker),
+      ...riders.map(_riderMarker),
     ];
+
+    final mePoint = _myPoint(location);
+    if (mePoint != null) {
+      final alreadyShown = riders.any(
+        (r) => (r.lat - mePoint.latitude).abs() < 1e-5 && (r.lng - mePoint.longitude).abs() < 1e-5,
+      );
+      if (!alreadyShown) {
+        markers.add(
+          Marker(
+            point: mePoint,
+            width: 44,
+            height: 44,
+            child: const Icon(Icons.my_location, color: AppTheme.fuel, size: 28),
+          ),
+        );
+      }
+    }
+
+    if (!_fitted && riders.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _fitToRiders());
+    }
 
     return Scaffold(
       body: Stack(
@@ -164,19 +443,10 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
             mapController: _mapController,
             options: MapOptions(initialCenter: center, initialZoom: 12),
             children: [
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.groupride.mobile',
-              ),
+              AppMapStyle.tileLayer(),
               if (route.length >= 2)
                 PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: route,
-                      color: AppTheme.signal.withValues(alpha: 0.85),
-                      strokeWidth: 4,
-                    ),
-                  ],
+                  polylines: AppMapStyle.routePolylines(route),
                 ),
               MarkerLayer(markers: markers),
             ],
@@ -233,6 +503,25 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                         ),
                       ),
                       const Spacer(),
+                      if (isLeader)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: TextButton.icon(
+                            style: TextButton.styleFrom(
+                              backgroundColor: AppTheme.asphalt.withValues(alpha: 0.9),
+                              foregroundColor: AppTheme.mist,
+                            ),
+                            onPressed: _demoStarting ? null : _startDemo,
+                            icon: _demoStarting
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : const Icon(Icons.play_circle_outline),
+                            label: const Text('Demo run'),
+                          ),
+                        ),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
@@ -240,14 +529,75 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          '${realtime.riders.length} live · map',
+                          '${riders.length} riders live',
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
                       ),
                     ],
                   ),
                 ),
+                if (riders.isNotEmpty)
+                  SizedBox(
+                    height: 40,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      children: [
+                        for (final r in riders)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: Chip(
+                              backgroundColor: AppTheme.asphalt.withValues(alpha: 0.85),
+                              label: Text(
+                                '${r.displayName.split(' ').first} · ${r.role}',
+                                style: TextStyle(
+                                  color: AppTheme.statusColor(r.status),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 const Spacer(),
+                Padding(
+                  padding: const EdgeInsets.only(right: 12, bottom: 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _MapControlButton(
+                          tooltip: 'Zoom in',
+                          icon: Icons.add,
+                          onPressed: () => _zoomBy(1),
+                        ),
+                        const SizedBox(height: 8),
+                        _MapControlButton(
+                          tooltip: 'Zoom out',
+                          icon: Icons.remove,
+                          onPressed: () => _zoomBy(-1),
+                        ),
+                        const SizedBox(height: 8),
+                        _MapControlButton(
+                          tooltip: 'Show pack',
+                          icon: Icons.groups_outlined,
+                          onPressed: _showPack,
+                        ),
+                        const SizedBox(height: 8),
+                        _MapControlButton(
+                          tooltip: 'My location',
+                          icon: Icons.my_location,
+                          loading: _locating,
+                          emphasized: true,
+                          onPressed: _locating ? null : _goToMyLocation,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
                 _ActionBar(
                   onEmergency: _showEmergency,
                   onRejoin: _rejoin,
@@ -273,25 +623,14 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   }
 
   Marker _riderMarker(RiderLocation r) {
-    final color = AppTheme.statusColor(r.status);
-    final isLead = r.role.toLowerCase() == 'leader';
-    final isSweep = r.role.toLowerCase() == 'sweep';
     return Marker(
       point: LatLng(r.lat, r.lng),
       width: 56,
       height: 56,
-      child: Column(
-        children: [
-          Icon(
-            isLead ? Icons.navigation : isSweep ? Icons.shield : Icons.two_wheeler,
-            color: color,
-            size: 28,
-          ),
-          Text(
-            r.displayName.split(' ').first,
-            style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w700),
-          ),
-        ],
+      child: RiderLetterMarker(
+        displayName: r.displayName,
+        status: r.status,
+        role: r.role,
       ),
     );
   }
@@ -413,6 +752,59 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   }
 }
 
+class _MapControlButton extends StatelessWidget {
+  const _MapControlButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.loading = false,
+    this.emphasized = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final bool loading;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: emphasized ? AppTheme.signal : AppTheme.asphalt.withValues(alpha: 0.92),
+      shape: const CircleBorder(),
+      elevation: 2,
+      shadowColor: Colors.black54,
+      child: Tooltip(
+        message: tooltip,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: SizedBox(
+            width: 48,
+            height: 48,
+            child: Center(
+              child: loading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Icon(
+                      icon,
+                      color: emphasized ? Colors.white : AppTheme.mist,
+                      size: 22,
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ActionBar extends StatelessWidget {
   const _ActionBar({
     required this.onEmergency,
@@ -432,6 +824,22 @@ class _ActionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Widget mini(String label, VoidCallback? onPressed) {
+      return Expanded(
+        child: OutlinedButton(
+          onPressed: onPressed,
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+            minimumSize: const Size(0, 44),
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(label, maxLines: 1, textAlign: TextAlign.center),
+          ),
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
       child: Column(
@@ -454,18 +862,18 @@ class _ActionBar extends StatelessWidget {
           const SizedBox(height: 8),
           Row(
             children: [
-              Expanded(child: OutlinedButton(onPressed: onStatus, child: const Text('Status'))),
+              mini('Status', onStatus),
               if (onAlerts != null) ...[
                 const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(onPressed: onAlerts, child: const Text('Alerts'))),
+                mini('Alerts', onAlerts),
               ],
               if (onAnnounce != null) ...[
                 const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(onPressed: onAnnounce, child: const Text('Announce'))),
+                mini('Announce', onAnnounce),
               ],
               if (onEnd != null) ...[
                 const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(onPressed: onEnd, child: const Text('End'))),
+                mini('End', onEnd),
               ],
             ],
           ),

@@ -48,12 +48,24 @@ class ApiClient {
     return _decode(res);
   }
 
+  Future<dynamic> delete(String path) async {
+    final res = await _client.delete(_uri(path), headers: _headers);
+    return _decode(res);
+  }
+
   dynamic _decode(http.Response res) {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       if (res.body.isEmpty) return null;
       return jsonDecode(res.body);
     }
-    throw ApiException(res.statusCode, res.body.isEmpty ? res.reasonPhrase ?? 'Error' : res.body);
+    var message = res.body.isEmpty ? (res.reasonPhrase ?? 'Error') : res.body;
+    try {
+      final parsed = jsonDecode(res.body);
+      if (parsed is Map && parsed['error'] != null) {
+        message = parsed['error'].toString();
+      }
+    } catch (_) {}
+    throw ApiException(res.statusCode, message);
   }
 
   void dispose() => _client.close();
