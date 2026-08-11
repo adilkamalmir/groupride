@@ -107,10 +107,21 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     try {
       final near = await context.read<MapsService>().nearby(lat: lat, lng: lng);
       if (!mounted) return;
-      setState(() => _nearYou = near);
+      setState(() {
+        _nearYou = near;
+        // Soft notice only — form remains usable with typed search.
+        if (near.isEmpty && _locationError == null) {
+          _locationError = 'No nearby suggestions yet — type a place name to search.';
+        }
+      });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _locationError = 'Could not load nearby places: $e');
+      // Never block create-ride on nearby failures; autocomplete still works.
+      setState(() {
+        _nearYou = const [];
+        _locationError =
+            'Nearby chips unavailable right now. Type a meeting point or destination to search.';
+      });
     }
   }
 

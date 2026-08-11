@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../models/models.dart';
 import '../theme.dart';
+import 'rider_letter_marker.dart';
 
 class RideMapView extends StatelessWidget {
   const RideMapView({
@@ -60,35 +61,16 @@ class RideMapView extends StatelessWidget {
         ),
       ),
       ...riders.map((r) {
-        final color = AppTheme.statusColor(r.status);
-        final isLead = r.role.toLowerCase() == 'leader';
-        final isSweep = r.role.toLowerCase() == 'sweep';
         return Marker(
           point: LatLng(r.lat, r.lng),
           width: 64,
           height: 56,
           child: GestureDetector(
             onTap: onMarkerTap == null ? null : () => onMarkerTap!(r),
-            child: Column(
-              children: [
-                Icon(
-                  isLead
-                      ? Icons.navigation
-                      : isSweep
-                          ? Icons.shield
-                          : Icons.two_wheeler,
-                  color: color,
-                  size: 26,
-                ),
-                Text(
-                  r.displayName.split(' ').first,
-                  style: TextStyle(
-                    color: color,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
+            child: RiderLetterMarker(
+              displayName: r.displayName,
+              status: r.status,
+              role: r.role,
             ),
           ),
         );

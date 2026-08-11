@@ -226,52 +226,17 @@ public static class RideEndpoints
         });
 
         g.MapDelete("/{id:guid}", async (Guid id, ClaimsPrincipal principal, AppDbContext db) =>
-        {
-            var userId = principal.GetUserId();
-            var ride = await db.Rides
-                .Include(r => r.Members)
-                .Include(r => r.Stops)
-                .Include(r => r.Invites)
-                .Include(r => r.Alerts)
-                .Include(r => r.Emergencies)
-                .Include(r => r.Timeline)
-                .FirstOrDefaultAsync(r => r.Id == id);
-            if (ride is null) return Results.NotFound(new { error = "Ride not found" });
+            await DeleteRideAsync(id, principal, db));
 
-            var me = ride.Members.FirstOrDefault(m => m.UserId == userId);
-            if (me is null)
-                return Results.Json(new { error = "You are not a member of this ride." }, statusCode: StatusCodes.Status403Forbidden);
-
-            var canDelete = me.Role == RideRole.Leader || ride.CreatedByUserId == userId;
-            if (!canDelete)
-                return Results.Json(new { error = "Only the ride leader can delete this ride." }, statusCode: StatusCodes.Status403Forbidden);
-
-            var pings = await db.LocationPings.Where(p => p.RideId == id).ToListAsync();
-            if (pings.Count > 0)
-                db.LocationPings.RemoveRange(pings);
-
-            db.Rides.Remove(ride);
-            await db.SaveChangesAsync();
-            return Results.NoContent();
-        });
+        // Alias for environments that block HTTP DELETE.
+        g.MapPost("/{id:guid}/delete", async (Guid id, ClaimsPrincipal principal, AppDbContext db) =>
+            await DeleteRideAsync(id, principal, db));
 
         g.MapPost("/{id:guid}/demo", async (Guid id, ClaimsPrincipal principal, DemoRideSimulator demo) =>
-        {
-            var userId = principal.GetUserId();
-            try
-            {
-                await demo.StartAsync(id, userId);
-                return Results.Accepted($"/api/rides/{id}", new { rideId = id, demo = true });
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return Results.Forbid();
-            }
-            catch (InvalidOperationException ex)
-            {
-                return Results.BadRequest(new { error = ex.Message });
-            }
-        });
+            await StartDemoAsync(id, principal, demo));
+
+        g.MapPost("/{id:guid}/start-demo", async (Guid id, ClaimsPrincipal principal, DemoRideSimulator demo) =>
+            await StartDemoAsync(id, principal, demo));
 
         g.MapPost("/{id:guid}/roles", async (Guid id, AssignRoleRequest req, ClaimsPrincipal principal, AppDbContext db, IHubContext<RideHub> hub) =>
         {
@@ -573,6 +538,54 @@ public static class RideEndpoints
         }).RequireAuthorization();
 
         return g;
+    }
+
+    private static async Task<IResult> DeleteRideAsync(Guid id, ClaimsPrincipal principal, AppDbContext db)
+    {
+        var userId = principal.GetUserId();
+        var ride = await db.Rides
+            .Include(r => r.Members)
+            .Include(r => r.Stops)
+            .Include(r => r.Invites)
+            .Include(r => r.Alerts)
+            .Include(r => r.Emergencies)
+            .Include(r => r.Timeline)
+            .FirstOrDefaultAsync(r => r.Id == id);
+        if (ride is null) return Results.NotFound(new { error = "Ride not found" });
+
+        var me = ride.Members.FirstOrDefault(m => m.UserId == userId);
+        if (me is null)
+            return Results.Json(new { error = "You are not a member of this ride." }, statusCode: StatusCodes.Status403Forbidden);
+
+        var canDelete = me.Role == RideRole.Leader || ride.CreatedByUserId == userId;
+        if (!canDelete)
+            return Results.Json(new { error = "Only the ride leader can delete this ride." }, statusCode: StatusCodes.Status403Forbidden);
+
+        var pings = await db.LocationPings.Where(p => p.RideId == id).ToListAsync();
+        if (pings.Count > 0)
+            db.LocationPings.RemoveRange(pings);
+
+        db.Rides.Remove(ride);
+        await db.SaveChangesAsync();
+        return Results.NoContent();
+    }
+
+    private static async Task<IResult> StartDemoAsync(Guid id, ClaimsPrincipal principal, DemoRideSimulator demo)
+    {
+        var userId = principal.GetUserId();
+        try
+        {
+            await demo.StartAsync(id, userId);
+            return Results.Accepted($"/api/rides/{id}", new { rideId = id, demo = true });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Results.Json(new { error = "Only the ride leader can start a demo." }, statusCode: StatusCodes.Status403Forbidden);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
     }
 
     private static async Task<Ride?> LoadRide(AppDbContext db, Guid id) =>

@@ -19,12 +19,18 @@ if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   else
     echo "No GOOGLE_MAPS_API_KEY — using local map fallback (known Ottawa places)."
   fi
-  docker compose up -d --build
+  docker compose up -d --build --force-recreate
   echo "Waiting for API health..."
   for i in $(seq 1 60); do
     if curl -sf http://127.0.0.1:5080/health >/dev/null; then
       curl -s http://127.0.0.1:5080/health
       echo
+      echo "Checking demo + nearby endpoints..."
+      # Unauthenticated probe: 401 means route exists; 404 means image is stale.
+      code_demo=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:5080/api/rides/00000000-0000-0000-0000-000000000001/demo || true)
+      code_near=$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:5080/api/maps/nearby?lat=45.3&lng=-75.9' || true)
+      echo "  POST /api/rides/.../demo → HTTP $code_demo (expect 401/403/400, not 404)"
+      echo "  GET  /api/maps/nearby     → HTTP $code_near (expect 200, not 404)"
       docker compose ps
       exit 0
     fi

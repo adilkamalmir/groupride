@@ -40,6 +40,13 @@ public static class MapsEndpoints
             return Results.Ok(suggestions);
         });
 
+        // Alias for clients / older docs that look under /places-nearby
+        g.MapGet("/places-nearby", async (double lat, double lng, string? kind, IMapProvider maps) =>
+        {
+            var suggestions = await maps.NearbySuggestionsAsync(lat, lng, kind);
+            return Results.Ok(suggestions);
+        });
+
         g.MapGet("/place", async (string placeId, IMapProvider maps) =>
         {
             if (string.IsNullOrWhiteSpace(placeId))

@@ -8,16 +8,19 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/models.dart';
+import '../services/api_client.dart';
 import '../services/auth_service.dart';
 import '../services/location_service.dart';
 import '../services/ride_realtime_service.dart';
 import '../services/ride_service.dart';
 import '../theme.dart';
+import '../widgets/rider_letter_marker.dart';
 import 'timeline_screen.dart';
 
 class LiveRideScreen extends StatefulWidget {
-  const LiveRideScreen({super.key, required this.rideId});
+  const LiveRideScreen({super.key, required this.rideId, this.autoStartDemo = false});
   final String rideId;
+  final bool autoStartDemo;
 
   @override
   State<LiveRideScreen> createState() => _LiveRideScreenState();
@@ -32,6 +35,9 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   bool _demoStarting = false;
   bool _fitted = false;
   bool _locating = false;
+  bool _localDemo = false;
+  List<RiderLocation> _demoRiders = const [];
+  Timer? _demoTimer;
   late final RideRealtimeService _realtime;
   late final LocationService _location;
 
@@ -65,6 +71,11 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     await _location.start(intervalSeconds: ride.pingIntervalSeconds);
     setState(() => _starting = false);
     _realtime.addListener(_onRealtime);
+    if (widget.autoStartDemo) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _startDemo();
+      });
+    }
   }
 
   void _onRealtime() {
@@ -106,6 +117,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
 
   @override
   void dispose() {
+    _demoTimer?.cancel();
     _realtime.removeListener(_onRealtime);
     _location.stop();
     _realtime.disconnect();
@@ -132,6 +144,7 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   }
 
   List<RiderLocation> _visibleRiders(Ride ride, RideRealtimeService realtime) {
+    if (_localDemo && _demoRiders.isNotEmpty) return _demoRiders;
     final source = realtime.riders.isNotEmpty ? realtime.riders : ride.knownRiderLocations();
     return source
         .where((r) => r.lat.isFinite && r.lng.isFinite && r.lat.abs() <= 90 && r.lng.abs() <= 180)
@@ -224,6 +237,14 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     _fitToRiders();
   }
 
+  void _zoomBy(double delta) {
+    try {
+      final cam = _mapController.camera;
+      final next = (cam.zoom + delta).clamp(3.0, 18.0);
+      _mapController.move(cam.center, next);
+    } catch (_) {}
+  }
+
   Future<void> _startDemo() async {
     setState(() {
       _demoStarting = true;
@@ -231,14 +252,119 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
     });
     try {
       await context.read<RideService>().startDemo(widget.rideId);
-      // Refresh membership (demo riders may have been added).
       final ride = await context.read<RideService>().getRide(widget.rideId);
       if (mounted) setState(() => _ride = ride);
+    } on ApiException catch (e) {
+      if (e.statusCode == 404 || e.statusCode == 405) {
+        // API image missing demo endpoints — animate locally, then end the ride.
+        await _startLocalDemo();
+      } else if (mounted) {
+        setState(() => _banner = 'Demo failed: $e');
+      }
     } catch (e) {
       if (mounted) setState(() => _banner = 'Demo failed: $e');
     } finally {
       if (mounted) setState(() => _demoStarting = false);
     }
+  }
+
+  Future<void> _startLocalDemo() async {
+    final ride = _ride;
+    if (ride == null) return;
+
+    try {
+      await context.read<RideService>().startRide(widget.rideId);
+    } catch (_) {
+      // Already live is fine.
+    }
+
+    final path = _routePoints(ride);
+    if (path.length < 2) {
+      if (mounted) setState(() => _banner = 'Demo needs a route with meet + destination');
+      return;
+    }
+
+    final me = context.read<AuthService>().userId ?? 'me';
+    final meMembers = ride.members.where((m) => m.userId == me);
+    final meName = meMembers.isEmpty ? 'You' : meMembers.first.displayName;
+
+    const pack = [
+      ('demo-alex', 'Alex', 'Leader'),
+      ('demo-sam', 'Sam', 'Rider'),
+      ('demo-jordan', 'Jordan', 'Sweep'),
+    ];
+
+    LatLng pointAt(double t) {
+      final clamped = t.clamp(0.0, 1.0);
+      final exact = clamped * (path.length - 1);
+      final i = exact.floor().clamp(0, path.length - 2);
+      final f = exact - i;
+      final a = path[i];
+      final b = path[i + 1];
+      return LatLng(
+        a.latitude + (b.latitude - a.latitude) * f,
+        a.longitude + (b.longitude - a.longitude) * f,
+      );
+    }
+
+    setState(() {
+      _localDemo = true;
+      _banner = 'Local demo run — pack moving along your route';
+      _fitted = false;
+    });
+
+    const steps = 24;
+    var step = 0;
+    _demoTimer?.cancel();
+    _demoTimer = Timer.periodic(const Duration(milliseconds: 900), (timer) async {
+      step++;
+      final progress = step / steps;
+      final riders = <RiderLocation>[];
+      for (var i = 0; i < pack.length; i++) {
+        final p = pointAt((progress - i * 0.04).clamp(0.0, 1.0));
+        riders.add(
+          RiderLocation(
+            userId: pack[i].$1,
+            displayName: pack[i].$2,
+            role: pack[i].$3,
+            status: 'Riding',
+            lat: p.latitude,
+            lng: p.longitude,
+          ),
+        );
+      }
+      final mePoint = pointAt(progress);
+      riders.add(
+        RiderLocation(
+          userId: me,
+          displayName: meName,
+          role: 'Leader',
+          status: 'Riding',
+          lat: mePoint.latitude,
+          lng: mePoint.longitude,
+        ),
+      );
+
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() => _demoRiders = riders);
+      if (!_fitted) _fitToRiders();
+
+      if (step >= steps) {
+        timer.cancel();
+        try {
+          await context.read<RideService>().endRide(widget.rideId);
+        } catch (_) {}
+        if (!mounted) return;
+        setState(() {
+          _localDemo = false;
+          _banner = 'Demo complete';
+        });
+        await _goToTimeline();
+      }
+    });
   }
 
   @override
@@ -455,6 +581,18 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         _MapControlButton(
+                          tooltip: 'Zoom in',
+                          icon: Icons.add,
+                          onPressed: () => _zoomBy(1),
+                        ),
+                        const SizedBox(height: 8),
+                        _MapControlButton(
+                          tooltip: 'Zoom out',
+                          icon: Icons.remove,
+                          onPressed: () => _zoomBy(-1),
+                        ),
+                        const SizedBox(height: 8),
+                        _MapControlButton(
                           tooltip: 'Show pack',
                           icon: Icons.groups_outlined,
                           onPressed: _showPack,
@@ -496,25 +634,14 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   }
 
   Marker _riderMarker(RiderLocation r) {
-    final color = AppTheme.statusColor(r.status);
-    final isLead = r.role.toLowerCase() == 'leader';
-    final isSweep = r.role.toLowerCase() == 'sweep';
     return Marker(
       point: LatLng(r.lat, r.lng),
       width: 56,
       height: 56,
-      child: Column(
-        children: [
-          Icon(
-            isLead ? Icons.navigation : isSweep ? Icons.shield : Icons.two_wheeler,
-            color: color,
-            size: 28,
-          ),
-          Text(
-            r.displayName.split(' ').first,
-            style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w700),
-          ),
-        ],
+      child: RiderLetterMarker(
+        displayName: r.displayName,
+        status: r.status,
+        role: r.role,
       ),
     );
   }

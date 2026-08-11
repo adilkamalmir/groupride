@@ -199,10 +199,21 @@ class _RideLobbyScreenState extends State<RideLobbyScreen> {
             const SizedBox(height: 8),
             OutlinedButton.icon(
               onPressed: () async {
-                await context.read<RideService>().startDemo(ride.id);
+                var startedOnApi = false;
+                try {
+                  await context.read<RideService>().startDemo(ride.id);
+                  startedOnApi = true;
+                } catch (_) {
+                  // Live screen falls back to on-device demo when API lacks /demo.
+                }
                 if (!mounted) return;
                 Navigator.of(context).pushReplacement(
-                  MaterialPageRoute(builder: (_) => LiveRideScreen(rideId: ride.id)),
+                  MaterialPageRoute(
+                    builder: (_) => LiveRideScreen(
+                      rideId: ride.id,
+                      autoStartDemo: !startedOnApi,
+                    ),
+                  ),
                 );
               },
               icon: const Icon(Icons.play_circle_outline),

@@ -1,4 +1,5 @@
 import '../services/api_client.dart';
+import 'local_places_fallback.dart';
 
 class GeocodedPlace {
   GeocodedPlace({
@@ -136,20 +137,51 @@ class MapsService {
     String? kind,
   }) async {
     final kindQs = kind == null ? '' : '&kind=${Uri.encodeQueryComponent(kind)}';
-    final data = await _api.get('/api/maps/nearby?lat=$lat&lng=$lng$kindQs');
-    final list = data as List? ?? const [];
-    return list
-        .map((e) => PlaceSuggestion.fromJson(Map<String, dynamic>.from(e as Map)))
-        .toList();
+    try {
+      final data = await _api.get('/api/maps/nearby?lat=$lat&lng=$lng$kindQs');
+      final list = data as List? ?? const [];
+      final parsed = list
+          .map((e) => PlaceSuggestion.fromJson(Map<String, dynamic>.from(e as Map)))
+          .where((s) => s.placeId.isNotEmpty && s.description.isNotEmpty)
+          .toList();
+      if (parsed.isNotEmpty) return parsed;
+    } on ApiException catch (e) {
+      // Older API builds lack /nearby — try aliases + autocomplete, then local list.
+      if (e.statusCode != 404 && e.statusCode != 405) rethrow;
+      try {
+        final data = await _api.get('/api/maps/places-nearby?lat=$lat&lng=$lng$kindQs');
+        final list = data as List? ?? const [];
+        final parsed = list
+            .map((e) => PlaceSuggestion.fromJson(Map<String, dynamic>.from(e as Map)))
+            .where((s) => s.placeId.isNotEmpty && s.description.isNotEmpty)
+            .toList();
+        if (parsed.isNotEmpty) return parsed;
+      } on ApiException {
+        // continue
+      }
+      try {
+        final viaAuto = await autocomplete('', lat: lat, lng: lng);
+        if (viaAuto.isNotEmpty) return viaAuto;
+      } on ApiException {
+        // continue
+      }
+    }
+    return LocalPlacesFallback.nearby(lat, lng, kind: kind);
   }
 
   Future<GeocodedPlace?> placeDetails(String placeId) async {
+    if (placeId.startsWith('local:')) {
+      final local = LocalPlacesFallback.resolve(placeId);
+      if (local != null) return local;
+    }
     try {
       final data =
           await _api.get('/api/maps/place?placeId=${Uri.encodeQueryComponent(placeId)}');
       return GeocodedPlace.fromJson(data as Map<String, dynamic>);
     } on ApiException catch (e) {
-      if (e.statusCode == 404) return null;
+      if (e.statusCode == 404) {
+        return LocalPlacesFallback.resolve(placeId);
+      }
       rethrow;
     }
   }
