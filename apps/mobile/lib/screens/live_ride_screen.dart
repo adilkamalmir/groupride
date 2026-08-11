@@ -587,7 +587,7 @@ class _ActionBar extends StatelessWidget {
           ),
           child: FittedBox(
             fit: BoxFit.scaleDown,
-            child: Text(label, maxLines: 1, softAlign: TextAlign.center),
+            child: Text(label, maxLines: 1, textAlign: TextAlign.center),
           ),
         ),
       );
