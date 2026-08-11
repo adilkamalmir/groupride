@@ -7,8 +7,4 @@ class AppConfig {
   );
 
   static String get hubUrl => '$apiBase/hubs/ride';
-
-  /// Ottawa / Kanata area — matches the iOS Simulator custom location used in local demos.
-  static const defaultLat = 45.31;
-  static const defaultLng = -75.91;
 }

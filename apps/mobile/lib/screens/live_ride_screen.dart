@@ -89,7 +89,10 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       setState(() => _banner = rt.lastFuelMessage);
     }
     setState(() {});
-    _fitToRiders();
+    // Fit once when we first get riders; avoid refitting every ping (NaN/Infinity risk).
+    if (!_fitted) {
+      _fitToRiders();
+    }
   }
 
   Future<void> _goToTimeline() async {
@@ -128,8 +131,10 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
   }
 
   List<RiderLocation> _visibleRiders(Ride ride, RideRealtimeService realtime) {
-    if (realtime.riders.isNotEmpty) return realtime.riders;
-    return ride.knownRiderLocations();
+    final source = realtime.riders.isNotEmpty ? realtime.riders : ride.knownRiderLocations();
+    return source
+        .where((r) => r.lat.isFinite && r.lng.isFinite && r.lat.abs() <= 90 && r.lng.abs() <= 180)
+        .toList();
   }
 
   void _fitToRiders() {
@@ -140,20 +145,47 @@ class _LiveRideScreenState extends State<LiveRideScreen> {
       ...riders.map((r) => LatLng(r.lat, r.lng)),
       if (_location.lastPosition != null)
         LatLng(_location.lastPosition!.latitude, _location.lastPosition!.longitude),
-    ];
+    ].where(_isFinitePoint).toList();
     if (points.isEmpty) return;
+
     try {
       if (points.length == 1) {
         _mapController.move(points.first, 13);
-      } else {
-        final bounds = LatLngBounds.fromPoints(points);
-        _mapController.fitCamera(
-          CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(48)),
-        );
+        _fitted = true;
+        return;
       }
+
+      final bounds = LatLngBounds.fromPoints(points);
+      if (!_isFinitePoint(bounds.northWest) ||
+          !_isFinitePoint(bounds.southEast) ||
+          ((bounds.north - bounds.south).abs() < 1e-8 &&
+              (bounds.east - bounds.west).abs() < 1e-8)) {
+        _mapController.move(points.first, 13);
+        _fitted = true;
+        return;
+      }
+
+      _mapController.fitCamera(
+        CameraFit.bounds(
+          bounds: bounds,
+          padding: const EdgeInsets.all(48),
+          maxZoom: 14,
+        ),
+      );
       _fitted = true;
-    } catch (_) {}
+    } catch (_) {
+      // Never let map camera math crash the live ride UI.
+      try {
+        _mapController.move(points.first, 12);
+      } catch (_) {}
+    }
   }
+
+  static bool _isFinitePoint(LatLng p) =>
+      p.latitude.isFinite &&
+      p.longitude.isFinite &&
+      p.latitude.abs() <= 90 &&
+      p.longitude.abs() <= 180;
 
   Future<void> _startDemo() async {
     setState(() {
@@ -545,6 +577,22 @@ class _ActionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Widget mini(String label, VoidCallback? onPressed) {
+      return Expanded(
+        child: OutlinedButton(
+          onPressed: onPressed,
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+            minimumSize: const Size(0, 44),
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(label, maxLines: 1, softAlign: TextAlign.center),
+          ),
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
       child: Column(
@@ -567,18 +615,18 @@ class _ActionBar extends StatelessWidget {
           const SizedBox(height: 8),
           Row(
             children: [
-              Expanded(child: OutlinedButton(onPressed: onStatus, child: const Text('Status'))),
+              mini('Status', onStatus),
               if (onAlerts != null) ...[
                 const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(onPressed: onAlerts, child: const Text('Alerts'))),
+                mini('Alerts', onAlerts),
               ],
               if (onAnnounce != null) ...[
                 const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(onPressed: onAnnounce, child: const Text('Announce'))),
+                mini('Announce', onAnnounce),
               ],
               if (onEnd != null) ...[
                 const SizedBox(width: 8),
-                Expanded(child: OutlinedButton(onPressed: onEnd, child: const Text('End'))),
+                mini('End', onEnd),
               ],
             ],
           ),

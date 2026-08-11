@@ -3,7 +3,6 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:provider/provider.dart';
 
-import '../config.dart';
 import '../services/location_service.dart';
 import '../services/maps_service.dart';
 import '../services/ride_service.dart';
@@ -34,10 +33,10 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
 
   GeocodedPlace? _meetPlace;
   GeocodedPlace? _destPlace;
-  /// Always seeded with Ottawa simulator coords so suggestions are local even before GPS returns.
-  double _hereLat = AppConfig.defaultLat;
-  double _hereLng = AppConfig.defaultLng;
-  bool _usingLiveGps = false;
+  double? _hereLat;
+  double? _hereLng;
+  bool _locating = true;
+  String? _locationError;
   List<GeocodedPlace> _routeStopIdeas = const [];
   List<PlaceSuggestion> _nearYou = const [];
 
@@ -59,33 +58,60 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _loadNearYou();
-      await _loadLocation();
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadLocation());
   }
 
   Future<void> _loadLocation() async {
     if (!mounted) return;
-    final pos = await context.read<LocationService>().currentPosition();
-    if (!mounted || pos == null) return;
+    setState(() {
+      _locating = true;
+      _locationError = null;
+    });
+
+    final location = context.read<LocationService>();
+    final permitted = await location.ensurePermission();
+    if (!mounted) return;
+    if (!permitted) {
+      setState(() {
+        _locating = false;
+        _locationError =
+            'Location permission is required so Google can suggest places near you.';
+      });
+      return;
+    }
+
+    final pos = await location.currentPosition();
+    if (!mounted) return;
+    if (pos == null) {
+      setState(() {
+        _locating = false;
+        _locationError =
+            'Could not read your GPS. In Simulator: Features → Location → Custom Location, then tap Retry.';
+      });
+      return;
+    }
+
     setState(() {
       _hereLat = pos.latitude;
       _hereLng = pos.longitude;
-      _usingLiveGps = true;
+      _locating = false;
+      _locationError = null;
     });
     await _loadNearYou();
   }
 
   Future<void> _loadNearYou() async {
+    final lat = _hereLat;
+    final lng = _hereLng;
+    if (lat == null || lng == null) return;
     try {
-      final near = await context.read<MapsService>().nearby(
-            lat: _hereLat,
-            lng: _hereLng,
-          );
+      final near = await context.read<MapsService>().nearby(lat: lat, lng: lng);
       if (!mounted) return;
       setState(() => _nearYou = near);
-    } catch (_) {}
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _locationError = 'Could not load nearby places: $e');
+    }
   }
 
   @override
@@ -99,20 +125,44 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     super.dispose();
   }
 
-  double get _biasLat => _meetPlace?.lat ?? _hereLat;
-  double get _biasLng => _meetPlace?.lng ?? _hereLng;
+  double? get _biasLat => _meetPlace?.lat ?? _hereLat;
+  double? get _biasLng => _meetPlace?.lng ?? _hereLng;
+  bool get _hasGps => _hereLat != null && _hereLng != null;
 
   @override
   Widget build(BuildContext context) {
-    final locationHint = _usingLiveGps
-        ? 'Near your GPS (${_hereLat.toStringAsFixed(2)}, ${_hereLng.toStringAsFixed(2)})'
-        : 'Near Ottawa simulator location (${_hereLat.toStringAsFixed(2)}, ${_hereLng.toStringAsFixed(2)})';
+    final locationHint = !_hasGps
+        ? 'Waiting for your phone location…'
+        : 'Suggestions near your location (${_hereLat!.toStringAsFixed(4)}, ${_hereLng!.toStringAsFixed(4)})';
 
     return Scaffold(
       appBar: AppBar(title: const Text('Create ride')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          if (_locating)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                title: Text('Getting your location…'),
+                subtitle: Text('Google suggestions will use your GPS position'),
+              ),
+            ),
+          if (_locationError != null) ...[
+            Text(_locationError!, style: const TextStyle(color: AppTheme.emergency)),
+            TextButton.icon(
+              onPressed: _loadLocation,
+              icon: const Icon(Icons.my_location),
+              label: const Text('Retry location'),
+            ),
+            const SizedBox(height: 8),
+          ],
           TextField(
             controller: _name,
             decoration: const InputDecoration(
@@ -132,6 +182,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
             controller: _meet,
             label: 'Meeting point',
             helperText: locationHint,
+            enabled: _hasGps,
             biasLat: _biasLat,
             biasLng: _biasLng,
             onPlaceSelected: (p) {
@@ -141,7 +192,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
           ),
           if (_nearYou.isNotEmpty) ...[
             const SizedBox(height: 8),
-            Text('Near you', style: const TextStyle(color: AppTheme.steel, fontSize: 13)),
+            const Text('Near you', style: TextStyle(color: AppTheme.steel, fontSize: 13)),
             const SizedBox(height: 6),
             Wrap(
               spacing: 8,
@@ -161,6 +212,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
             controller: _dest,
             label: 'Destination',
             helperText: locationHint,
+            enabled: _hasGps,
             biasLat: _biasLat,
             biasLng: _biasLng,
             onPlaceSelected: (p) {
@@ -189,7 +241,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
                 child: Text('Stops', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
               ),
               TextButton.icon(
-                onPressed: () => setState(() => _stops.add(_StopDraft())),
+                onPressed: !_hasGps ? null : () => setState(() => _stops.add(_StopDraft())),
                 icon: const Icon(Icons.add),
                 label: const Text('Add stop'),
               ),
@@ -326,7 +378,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     );
   }
 
-  double get _stopBiasLat {
+  double? get _stopBiasLat {
     if (_previewPath.length >= 2) {
       return _previewPath[_previewPath.length ~/ 2].latitude;
     }
@@ -336,7 +388,7 @@ class _CreateRideScreenState extends State<CreateRideScreen> {
     return _biasLat;
   }
 
-  double get _stopBiasLng {
+  double? get _stopBiasLng {
     if (_previewPath.length >= 2) {
       return _previewPath[_previewPath.length ~/ 2].longitude;
     }

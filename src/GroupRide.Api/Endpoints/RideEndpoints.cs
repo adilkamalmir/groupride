@@ -236,18 +236,20 @@ public static class RideEndpoints
                 .Include(r => r.Emergencies)
                 .Include(r => r.Timeline)
                 .FirstOrDefaultAsync(r => r.Id == id);
-            if (ride is null) return Results.NotFound();
+            if (ride is null) return Results.NotFound(new { error = "Ride not found" });
 
             var me = ride.Members.FirstOrDefault(m => m.UserId == userId);
-            if (me is null) return Results.Forbid();
-            if (me.Role != RideRole.Leader && ride.CreatedByUserId != userId)
-                return Results.Forbid();
+            if (me is null)
+                return Results.Json(new { error = "You are not a member of this ride." }, statusCode: StatusCodes.Status403Forbidden);
 
-            if (ride.Status == RideStatus.Live)
-                return Results.BadRequest(new { error = "End the live ride before deleting it." });
+            var canDelete = me.Role == RideRole.Leader || ride.CreatedByUserId == userId;
+            if (!canDelete)
+                return Results.Json(new { error = "Only the ride leader can delete this ride." }, statusCode: StatusCodes.Status403Forbidden);
 
-            var pings = db.LocationPings.Where(p => p.RideId == id);
-            db.LocationPings.RemoveRange(pings);
+            var pings = await db.LocationPings.Where(p => p.RideId == id).ToListAsync();
+            if (pings.Count > 0)
+                db.LocationPings.RemoveRange(pings);
+
             db.Rides.Remove(ride);
             await db.SaveChangesAsync();
             return Results.NoContent();

@@ -58,7 +58,14 @@ class ApiClient {
       if (res.body.isEmpty) return null;
       return jsonDecode(res.body);
     }
-    throw ApiException(res.statusCode, res.body.isEmpty ? res.reasonPhrase ?? 'Error' : res.body);
+    var message = res.body.isEmpty ? (res.reasonPhrase ?? 'Error') : res.body;
+    try {
+      final parsed = jsonDecode(res.body);
+      if (parsed is Map && parsed['error'] != null) {
+        message = parsed['error'].toString();
+      }
+    } catch (_) {}
+    throw ApiException(res.statusCode, message);
   }
 
   void dispose() => _client.close();
